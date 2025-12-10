@@ -19,10 +19,10 @@ pip install -r requirements.txt
 ```
 
 ## Running
-Running experiments based our code could be quite easy, so below we use `HalfCheetah-v3` task as an example. 
+Running experiments based on our code could be quite easy, so below we use `HalfCheetah-v3` task as an example. 
 
 ```
-python main.py --env_name HalfCheetah-v3--weighted --aug
+python main.py --env_name HalfCheetah-v3 --weighted --aug
 ```
 
 ## Citation
