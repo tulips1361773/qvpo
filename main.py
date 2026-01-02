@@ -111,17 +111,21 @@ def readParser():
     # 🔥🔥🔥 新增：归一化控制参数
     parser.add_argument('--normalize_state', type=bool, default=True,
                         help="enable state normalization (default: True)")
-    parser.add_argument('--normalize_reward', type=bool, default=True,
-                        help="enable reward scaling (default: True)")
+    # parser.add_argument('--normalize_reward', type=bool, default=True,
+    #                     help="enable reward scaling (default: True)")
 
     return parser.parse_args()
 
 
 def evaluate(env, agent, steps):
     """评估函数"""
+    # ✅ 新增：切换到评估模式（不再更新统计量）
+    if hasattr(env, 'state_normalizer'):
+        env.state_normalizer.set_training(False)
+    
     episodes = 10
     returns = np.zeros((episodes,), dtype=np.float32)
-
+    
     for i in range(episodes):
         state, _ = env.reset()
         episode_reward = 0.
@@ -133,12 +137,16 @@ def evaluate(env, agent, steps):
             next_state, reward, done, truncated, _ = env.step(action)
             episode_reward += reward
             state = next_state
-            
+        
         returns[i] = episode_reward
-
+    
+    # ✅ 新增：恢复训练模式
+    if hasattr(env, 'state_normalizer'):
+        env.state_normalizer.set_training(True)
+    
     mean_return = np.mean(returns)
     std_return = np.std(returns)
-
+    
     print('-' * 60)
     print(f'Num steps: {steps:<5}  '
           f'reward: {mean_return:<5.1f}  '
@@ -161,16 +169,15 @@ def main(args=None, logger=None, id=None):
     # 🔥🔥🔥 关键修改：直接实例化环境，传入归一化参数
     print("Initializing UAV-ISAC Environment...")
     print(f"  - State normalization: {args.normalize_state}")
-    print(f"  - Reward scaling: {args.normalize_reward}")
+    # print(f"  - Reward scaling: {args.normalize_reward}")
     
     env = UAVISACEnvironment(
         normalize_state=args.normalize_state,
-        normalize_reward=args.normalize_reward
+        # normalize_reward=args.normalize_reward  # 注释掉这个参数
     )
     
     eval_env = UAVISACEnvironment(
         normalize_state=args.normalize_state,
-        normalize_reward=args.normalize_reward
     )
     
     # 获取状态和动作维度

@@ -34,7 +34,7 @@ def calc_energy(
 
 
 # ============================================================
-# 新增：状态归一化器类
+# 改进版：状态归一化器类（完整版）
 # ============================================================
 class StateNormalizer:
     """在线运行时状态归一化器（Running Mean & Std）"""
@@ -47,6 +47,9 @@ class StateNormalizer:
         self.mean = np.zeros(state_dim, dtype=np.float64)
         self.var = np.ones(state_dim, dtype=np.float64)
         self.count = epsilon  # 避免除零
+        
+        # ✅ 新增：训练模式开关
+        self.training = True
         
     def update(self, state):
         """更新统计量（Welford's online algorithm）"""
@@ -69,66 +72,45 @@ class StateNormalizer:
         self.var = new_var
         self.count = total_count
         
-    def normalize(self, state, update_stats=True):
-        """归一化状态"""
+    def normalize(self, state, update_stats=None):
+        """
+        归一化状态
+        
+        Args:
+            state: 输入状态
+            update_stats: 
+                - None: 根据 self.training 决定是否更新统计量
+                - True: 强制更新统计量
+                - False: 强制不更新统计量
+        """
+        # ✅ 改进点1：根据训练模式自动决定是否更新
+        if update_stats is None:
+            update_stats = self.training
+        
         state = np.asarray(state, dtype=np.float32)
         
         if update_stats:
             self.update(state)
         
-        # 归一化
-        normalized = (state - self.mean) / (np.sqrt(self.var) + self.epsilon)
+        # ✅ 改进点2：动态epsilon，初期更保守
+        adaptive_epsilon = max(self.epsilon, 0.01 / (1 + self.count/1000))
+        std = np.sqrt(self.var) + adaptive_epsilon
+        normalized = (state - self.mean) / std
         
         # Clip 防止极端值
         normalized = np.clip(normalized, -self.clip_range, self.clip_range)
         
         return normalized.astype(np.float32)
-
-
-# ============================================================
-# 新增：奖励缩放器类
-# ============================================================
-class RewardScaler:
-    """奖励标准化/缩放器"""
-    def __init__(self, gamma=0.99, epsilon=1e-8, clip_range=10.0):
-        self.gamma = gamma
-        self.epsilon = epsilon
-        self.clip_range = clip_range
-        
-        # 统计量
-        self.return_val = 0.0
-        self.mean = 0.0
-        self.var = 1.0
-        self.count = epsilon
-        
-    def update(self, reward):
-        """更新回报统计"""
-        self.return_val = reward + self.gamma * self.return_val
-        
-        # 增量更新均值和方差
-        self.count += 1
-        delta = self.return_val - self.mean
-        self.mean += delta / self.count
-        delta2 = self.return_val - self.mean
-        self.var += delta * delta2
-        
-    def scale(self, reward, update_stats=True):
-        """缩放奖励"""
-        if update_stats:
-            self.update(reward)
-        
-        # 标准化
-        std = np.sqrt(self.var / self.count + self.epsilon)
-        scaled_reward = reward / (std + self.epsilon)
-        
-        # Clip 防止极端值
-        scaled_reward = np.clip(scaled_reward, -self.clip_range, self.clip_range)
-        
-        return scaled_reward
     
-    def reset_return(self):
-        """每个 episode 结束后重置回报"""
-        self.return_val = 0.0
+    # ✅ 新增：模式切换方法
+    def set_training(self, mode):
+        """
+        切换训练/评估模式
+        
+        Args:
+            mode: True表示训练模式，False表示评估模式
+        """
+        self.training = mode
 
 
 # ============================================================
@@ -185,9 +167,6 @@ class UAVISACEnvironment(gym.Env):
         
         if self.normalize_state:
             self.state_normalizer = StateNormalizer(state_dim=obs_dim)
-        
-        if self.normalize_reward:
-            self.reward_scaler = RewardScaler(gamma=0.99)
 
         # 初始化环境
         self.reset()
@@ -232,10 +211,6 @@ class UAVISACEnvironment(gym.Env):
 
         # 初始化前一个观察值为全零
         self.prev_obs = np.zeros_like(current_obs)
-
-        # 🔥 重置奖励归一化器的回报
-        if self.normalize_reward:
-            self.reward_scaler.reset_return()
 
         # 返回组合后的观察值（已归一化）
         combined_obs = self._get_combined_obs()
@@ -285,10 +260,6 @@ class UAVISACEnvironment(gym.Env):
         if self.total_energy > self.E_tot:
             reward -= self.energy_penalty
 
-        # 🔥 奖励缩放
-        if self.normalize_reward:
-            reward = self.reward_scaler.scale(reward, update_stats=True)
-
         # 计算奖励
         self.current_episode_reward += reward
 
@@ -312,11 +283,7 @@ class UAVISACEnvironment(gym.Env):
                 self.episode_rewards.append(average_rresult)
                 self.rresult = 0
                 self.t1 = 0
-            
-            # 🔥 Episode 结束后重置回报
-            if self.normalize_reward:
-                self.reward_scaler.reset_return()
-
+        
         # 获取当前观察值
         current_obs = self._get_obs()
 
