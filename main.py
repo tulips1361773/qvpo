@@ -8,31 +8,28 @@ from agent.qvpo import QVPO
 from agent.replay_memory import ReplayMemory, DiffusionMemory
 
 from tensorboardX import SummaryWriter
-import gymnasium as gym  # 修改1: 使用gymnasium替代gym
+import gymnasium as gym
 import os
 from logger import Logger
 import datetime
 
-# 修改2: 导入自定义环境
+# 修改1: 导入自定义环境
 from myenv import UAVISACEnvironment
 
 def readParser():
     parser = argparse.ArgumentParser(description='Diffusion Policy for UAV-ISAC')
     
-    # 修改3: 环境名称改为自定义环境
     parser.add_argument('--env_name', default="Env",
                         help='Custom UAV-ISAC environment (default: Env)')
     parser.add_argument('--seed', type=int, default=0, metavar='N',
                         help='random seed (default: 0)')
 
-    # 修改4: 根据UAV环境特性调整训练步数
     parser.add_argument('--num_steps', type=int, default=2500000, metavar='N',
-                        help='env timesteps (default: 2500000, 增加以适应复杂环境)')
+                        help='env timesteps (default: 2500000)')
 
     parser.add_argument('--batch_size', type=int, default=256, metavar='N',
                         help='batch size (default: 256)')
     
-    # 修改5: 调整折扣因子（UAV环境episode较短，可用更高的gamma）
     parser.add_argument('--gamma', type=float, default=0.99, metavar='G',
                         help='discount factor for reward (default: 0.99)')
     parser.add_argument('--tau', type=float, default=0.005, metavar='G',
@@ -47,7 +44,6 @@ def readParser():
     parser.add_argument('--n_timesteps', type=int, default=20, metavar='N',
                         help='diffusion timesteps (default: 20)')
     
-    # 修改6: 调整学习率（可能需要更小的学习率以应对高维状态）
     parser.add_argument('--diffusion_lr', type=float, default=0.0001, metavar='G',
                         help='diffusion learning rate (default: 0.0001)')
     parser.add_argument('--critic_lr', type=float, default=0.0003, metavar='G',
@@ -79,7 +75,6 @@ def readParser():
     parser.add_argument('--weighted', action="store_true", help="weighted training")
     parser.add_argument('--aug', action="store_true", help="augmentation")
 
-    # 修改7: 动作空间较小(3维)，可适当减少采样数
     parser.add_argument('--train_sample', type=int, default=64, metavar='N',
                         help='train_sample (default: 64)')
 
@@ -110,20 +105,24 @@ def readParser():
     parser.add_argument('--epsilon', type=float, default=0.0, metavar='G', 
                         help="eps greedy (default: 0.0)")
     
-    # 修改8: 增加熵系数以鼓励探索（UAV环境可能需要更多探索）
     parser.add_argument('--entropy_alpha', type=float, default=0.05, metavar='G', 
-                        help="entropy_alpha (default: 0.05, 增加探索)")
+                        help="entropy_alpha (default: 0.05)")
+    
+    # 🔥🔥🔥 新增：归一化控制参数
+    parser.add_argument('--normalize_state', type=bool, default=True,
+                        help="enable state normalization (default: True)")
+    parser.add_argument('--normalize_reward', type=bool, default=True,
+                        help="enable reward scaling (default: True)")
 
     return parser.parse_args()
 
 
 def evaluate(env, agent, steps):
-    """评估函数 - 修改9: 适配gymnasium的返回格式"""
+    """评估函数"""
     episodes = 10
     returns = np.zeros((episodes,), dtype=np.float32)
 
     for i in range(episodes):
-        # 修改10: gymnasium的reset返回(obs, info)
         state, _ = env.reset()
         episode_reward = 0.
         done = False
@@ -131,7 +130,6 @@ def evaluate(env, agent, steps):
         
         while not (done or truncated):
             action = agent.sample_action(state, eval=True)
-            # 修改11: gymnasium的step返回5个值
             next_state, reward, done, truncated, _ = env.step(action)
             episode_reward += reward
             state = next_state
@@ -160,12 +158,20 @@ def main(args=None, logger=None, id=None):
                           f'ratio={args.ratio}', f'seed={args.seed}')
     writer = SummaryWriter(log_dir)
 
-    # 修改12: 创建自定义环境
+    # 🔥🔥🔥 关键修改：直接实例化环境，传入归一化参数
     print("Initializing UAV-ISAC Environment...")
-    env = gym.make(args.env_name)
+    print(f"  - State normalization: {args.normalize_state}")
+    print(f"  - Reward scaling: {args.normalize_reward}")
     
-    # 修改13: gymnasium环境的deepcopy可能有问题，建议重新创建
-    eval_env = gym.make(args.env_name)
+    env = UAVISACEnvironment(
+        normalize_state=args.normalize_state,
+        normalize_reward=args.normalize_reward
+    )
+    
+    eval_env = UAVISACEnvironment(
+        normalize_state=args.normalize_state,
+        normalize_reward=args.normalize_reward
+    )
     
     # 获取状态和动作维度
     state_size = int(np.prod(env.observation_space.shape))
@@ -177,16 +183,11 @@ def main(args=None, logger=None, id=None):
     # 设置随机种子
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
-    
-    # 修改14: gymnasium使用reset(seed=...)而不是env.seed()
-    # 注意：seed在reset时设置，这里先不调用
 
     # 训练参数
     memory_size = 1e6
     num_steps = args.num_steps
-    
-    # 修改15: 增加初始探索步数（复杂环境需要更多探索）
-    start_steps = 25000  # 从10000增加到25000
+    start_steps = 25000
     eval_interval = 10000
     updates_per_step = 1
     batch_size = args.batch_size
@@ -213,8 +214,7 @@ def main(args=None, logger=None, id=None):
         done = False
         truncated = False
         
-        # 修改16: gymnasium的reset返回(obs, info)
-        state, _ = env.reset(seed=args.seed + episodes)  # 每个episode使用不同seed
+        state, _ = env.reset(seed=args.seed + episodes)
         episodes += 1
         
         while not (done or truncated):
@@ -224,7 +224,6 @@ def main(args=None, logger=None, id=None):
             else:
                 action = agent.sample_action(state, eval=False)
             
-            # 修改17: gymnasium的step返回5个值
             next_state, reward, done, truncated, info = env.step(action)
 
             # mask计算
