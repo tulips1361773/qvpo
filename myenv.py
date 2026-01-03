@@ -217,7 +217,7 @@ class UAVISACEnvironment(gym.Env):
         
         # 🔥 状态归一化
         if self.normalize_state:
-            combined_obs = self.state_normalizer.normalize(combined_obs, update_stats=True)
+            combined_obs = self.state_normalizer.normalize(combined_obs)
         
         return combined_obs, {}
 
@@ -253,12 +253,18 @@ class UAVISACEnvironment(gym.Env):
             reward = self._calculate_reward(new_uav_position, power_allocation)
             self.uav_position = new_uav_position
 
+         # ✅ 新增：一级裁剪（防止奖励函数的极端值）
+        reward = np.clip(reward, -50.0, 80.0)
+
         # 能耗计算
         horizontal_speed = abs(distance) / 4.0
         energy_t = calc_energy(horizontal_speed, self.delta_t)
         self.total_energy += energy_t
         if self.total_energy > self.E_tot:
             reward -= self.energy_penalty
+
+         # ✅ 新增：二级裁剪（能耗惩罚后的保护）
+        reward = np.clip(reward, -60.0, 80.0)
 
         # 计算奖励
         self.current_episode_reward += reward
@@ -292,7 +298,7 @@ class UAVISACEnvironment(gym.Env):
 
         # 🔥 状态归一化
         if self.normalize_state:
-            combined_obs = self.state_normalizer.normalize(combined_obs, update_stats=True)
+            combined_obs = self.state_normalizer.normalize(combined_obs)
 
         # 更新前一个观察值
         self.prev_obs = current_obs.copy()
