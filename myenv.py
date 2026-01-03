@@ -306,27 +306,29 @@ class UAVISACEnvironment(gym.Env):
         return combined_obs, reward, done, False, {}
 
     def _calculate_reward(self, uav_position, power_allocation):
-        # 计算合法接收机的感知信噪比
         eta_0 = self._calculate_sensing_snr_legal(uav_position, power_allocation)
         reward = eta_0
-        
+    
         communication_threshold = 10.0
         eavesdropper_threshold = 10.0
 
-        # 计算通信用户的通信信噪比
+        # ✅ 修改1：降低通信惩罚系数，并添加上限
+        total_comm_penalty = 0
         for k in range(self.K):
             distance = np.linalg.norm(uav_position - self.user_positions[k])
             snr = self._calculate_communication_snr(distance, power_allocation)
             snr_gap = communication_threshold - snr
             if snr_gap > 0:
-                reward -= 2*snr_gap
+                total_comm_penalty += min(1.5 * snr_gap, 15.0)  # 原来2*，改为1.5*，上限15
+    
+        reward -= min(total_comm_penalty, 30.0)  # 总惩罚上限30
 
-        # 计算非法感知者的感知信噪比
+        # ✅ 修改2：降低窃听惩罚系数
         eavesdropper_snr_list = self._calculate_sensing_snr_eavesdropper(uav_position, power_allocation)
         sensing_snr_eavesdropper = max(eavesdropper_snr_list)
         snr_gap2 = sensing_snr_eavesdropper - eavesdropper_threshold
         if snr_gap2 > 0:
-            reward -= 5*snr_gap2
+            reward -= min(3 * snr_gap2, 20.0)  # 原来5*，改为3*，上限20
 
         return reward
 
