@@ -109,7 +109,7 @@ def readParser():
                         help="entropy_alpha (default: 0.05)")
     
     # 🔥🔥🔥 新增：归一化控制参数
-    parser.add_argument('--normalize_state', type=bool, default=True,
+    parser.add_argument('--normalize_state', action=argparse.BooleanOptionalAction, default=True,
                         help="enable state normalization (default: True)")
     # parser.add_argument('--normalize_reward', type=bool, default=True,
     #                     help="enable reward scaling (default: True)")
@@ -255,6 +255,10 @@ def main(args=None, logger=None, id=None):
                 print(f"\n{'='*60}")
                 print(f"Evaluation at step {steps}")
                 print(f"{'='*60}")
+                if args.normalize_state and hasattr(env, 'state_normalizer') and hasattr(eval_env, 'state_normalizer'):
+                    eval_env.state_normalizer.mean = env.state_normalizer.mean.copy()
+                    eval_env.state_normalizer.var = env.state_normalizer.var.copy()
+                    eval_env.state_normalizer.count = env.state_normalizer.count
                 tmp_result = evaluate(eval_env, agent, steps)
                 
                 if tmp_result > best_result:
