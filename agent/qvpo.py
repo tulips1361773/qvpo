@@ -180,6 +180,14 @@ class QVPO(object):
                 #     log_writer.add_scalar('Critic Grad Norm', critic_grad_norms.max().item(), self.step)
             self.critic_optimizer.step()
 
+            if log_writer is not None and self.step % 200 == 0:
+                with torch.no_grad():
+                    log_writer.add_scalar('loss/critic', critic_loss.item(), t)
+                    log_writer.add_scalar('q/current_q1_mean', current_q1.mean().item(), t)
+                    log_writer.add_scalar('q/current_q2_mean', current_q2.mean().item(), t)
+                    log_writer.add_scalar('q/target_q_mean', target_q.mean().item(), t)
+                    log_writer.add_scalar('q/reward_mean', rewards.mean().item(), t)
+
             """ Policy Training """
             if t % self.policy_freq == 0:
                 if self.aug:
@@ -231,6 +239,12 @@ class QVPO(object):
                     # if self.step % 10 == 0:
                     #     log_writer.add_scalar('Actor Grad Norm', actor_grad_norms.max().item(), self.step)
                 self.actor_optimizer.step()
+
+                if log_writer is not None and self.step % 200 == 0:
+                    log_writer.add_scalar('loss/actor', actor_loss.item(), t)
+                    if self.policy_type == 'Diffusion' and self.weighted:
+                        log_writer.add_scalar('q/running_q_mean', float(self.running_q_mean), t)
+                        log_writer.add_scalar('q/running_q_std', float(self.running_q_std), t)
 
             """ Step Target network """
             for param, target_param in zip(self.critic.parameters(), self.critic_target.parameters()):

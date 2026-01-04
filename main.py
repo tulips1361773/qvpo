@@ -16,6 +16,19 @@ import datetime
 # 修改1: 导入自定义环境
 from myenv import UAVISACEnvironment
 
+
+def _str2bool(v):
+    if isinstance(v, bool):
+        return v
+    if v is None:
+        return True
+    v = str(v).strip().lower()
+    if v in ("1", "true", "t", "yes", "y", "on"):
+        return True
+    if v in ("0", "false", "f", "no", "n", "off"):
+        return False
+    raise argparse.ArgumentTypeError(f"Invalid boolean value: {v}")
+
 def readParser():
     parser = argparse.ArgumentParser(description='Diffusion Policy for UAV-ISAC')
     
@@ -108,17 +121,25 @@ def readParser():
     parser.add_argument('--entropy_alpha', type=float, default=0.05, metavar='G', 
                         help="entropy_alpha (default: 0.05)")
     
-    # 🔥🔥🔥 新增：归一化控制参数
-    parser.add_argument('--normalize_state', action=argparse.BooleanOptionalAction, default=True,
-                        help="enable state normalization (default: True)")
+    # f525f525f525                  
+    if hasattr(argparse, 'BooleanOptionalAction'):
+        parser.add_argument('--normalize_state', action=argparse.BooleanOptionalAction, default=True,
+                            help="enable state normalization (default: True)")
+    else:
+        parser.add_argument('--normalize_state', type=_str2bool, nargs='?', const=True, default=True,
+                            help="enable state normalization (default: True)")
     # parser.add_argument('--normalize_reward', type=bool, default=True,
     #                     help="enable reward scaling (default: True)")
 
     return parser.parse_args()
 
 
-def evaluate(env, agent, steps):
+def evaluate(env, agent, steps, source_env=None):
     """评估函数"""
+    if source_env is not None and hasattr(source_env, 'state_normalizer') and hasattr(env, 'state_normalizer'):
+        env.state_normalizer.mean = source_env.state_normalizer.mean.copy()
+        env.state_normalizer.var = source_env.state_normalizer.var.copy()
+        env.state_normalizer.count = source_env.state_normalizer.count
     # ✅ 新增：切换到评估模式（不再更新统计量）
     if hasattr(env, 'state_normalizer'):
         env.state_normalizer.set_training(False)
@@ -255,11 +276,7 @@ def main(args=None, logger=None, id=None):
                 print(f"\n{'='*60}")
                 print(f"Evaluation at step {steps}")
                 print(f"{'='*60}")
-                if args.normalize_state and hasattr(env, 'state_normalizer') and hasattr(eval_env, 'state_normalizer'):
-                    eval_env.state_normalizer.mean = env.state_normalizer.mean.copy()
-                    eval_env.state_normalizer.var = env.state_normalizer.var.copy()
-                    eval_env.state_normalizer.count = env.state_normalizer.count
-                tmp_result = evaluate(eval_env, agent, steps)
+                tmp_result = evaluate(eval_env, agent, steps, source_env=env)
                 
                 if tmp_result > best_result:
                     best_result = tmp_result

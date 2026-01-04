@@ -60,3 +60,51 @@ Feedback
 
 为什么仍然报 X11/Xlib.h 错？
 因为 mujoco_py 的 C 扩展在编译时仍会 include eglplatform.h，而这个头文件默认依赖 X11 头文件；你设置的环境变量只影响运行时，不影响编译时的 include 路径和宏定义。
+
+
+---
+
+# 修改记录：状态归一化（State Normalization）逻辑核查与修复
+## 修改时间
+2026-01-03
+
+## 涉及文件
+- `main.py`
+- `myenv.py`
+
+## 背景与问题
+训练环境 `env` 和评估环境 `eval_env` 是两个独立实例。
+
+当启用状态归一化时（`normalize_state=True`），每个环境都会各自维护一套 `StateNormalizer` 的统计量（`mean/var/count`）。如果评估环境不使用训练阶段累计出来的统计量，会导致：
+- 评估时的状态分布与训练时不一致
+- 策略网络输入尺度不一致，从而造成评估结果失真
+
+另外，原先命令行布尔参数解析方式存在常见陷阱：`type=bool` 会导致 `--xxx False` 仍被解析为 True。
+
+## 已完成的修改
+### 1. 修复 `--normalize_state` 的布尔参数解析
+在 `main.py` 中将布尔参数解析改为“优先使用 Python 3.9+ 的 `BooleanOptionalAction`，否则退化为 `_str2bool` 解析”，从而：
+- 在 Python 3.9+ 可使用 `--normalize-state / --no-normalize-state`
+- 在 Python < 3.9 可使用 `--normalize_state False/True`
+- 避免 `type=bool` 导致的错误解析
+
+### 2. 统一训练/评估的归一化统计量
+在 `main.py` 中调整评估调用为：
+
+`evaluate(eval_env, agent, steps, source_env=env)`
+
+并在 `evaluate()` 内部增加逻辑：若提供了 `source_env`，则在评估开始前将 `source_env.state_normalizer` 的 `mean/var/count` 同步到 `eval_env.state_normalizer`。
+
+这样保证：
+- 每次评估使用的归一化统计量与训练一致
+- 评估环境的 reset/step 不会意外污染统计量（评估阶段会先切换 `training=False`）
+
+## 调用链复核结论（myenv.py）
+`myenv.py` 中状态归一化的调用链为：
+- `reset()`：构造 `combined_obs = [current_obs, prev_obs]` 后再归一化
+- `step()`：构造 `combined_obs = [current_obs, prev_obs]` 后再归一化，然后更新 `prev_obs`
+
+评估时通过 `StateNormalizer.set_training(False)` 关闭统计量更新，因此不会在评估期间更新 running mean/std。
+
+## 当前结果
+状态归一化开关解析更可靠，训练/评估的归一化统计量一致性问题已修复，评估结果可解释性更强。
