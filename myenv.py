@@ -174,23 +174,20 @@ class UAVISACEnvironment(gym.Env):
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
 
-        if seed is not None:
-            np.random.seed(seed)
-
         self.current_slot = 0
         self.current_episode_reward = 0
         self.total_energy = 0.0
 
-        x1 = np.random.uniform(-400, 400)
-        y1 = np.random.uniform(-400, 400)
+        x1 = self.np_random.uniform(-400, 400)
+        y1 = self.np_random.uniform(-400, 400)
         self.uav_position = np.array([x1, y1, self.H])
 
         # 初始化通信用户位置
         self.user_positions = []
         for _ in range(self.K):
             while True:
-                user_x = np.random.uniform(-400, 400)
-                user_y = np.random.uniform(-400, 400)
+                user_x = self.np_random.uniform(-400, 400)
+                user_y = self.np_random.uniform(-400, 400)
                 if (user_x ** 2 + user_y ** 2) > 10000:
                     break
             self.user_positions.append([user_x, user_y, 0])
@@ -416,8 +413,8 @@ class UAVISACEnvironment(gym.Env):
             valid = False
 
             while not valid:
-                move_distance = np.random.uniform(0, 50)
-                move_angle = np.random.uniform(-np.pi, np.pi)
+                move_distance = self.np_random.uniform(0, 50)
+                move_angle = self.np_random.uniform(-np.pi, np.pi)
 
                 delta_x = move_distance * np.cos(move_angle)
                 delta_y = move_distance * np.sin(move_angle)

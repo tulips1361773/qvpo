@@ -108,3 +108,45 @@ Feedback
 
 ## 当前结果
 状态归一化开关解析更可靠，训练/评估的归一化统计量一致性问题已修复，评估结果可解释性更强。
+
+
+---
+
+# 问题记录：训练震荡严重/不收敛（环境重置全局 RNG 干扰回放采样）
+## 问题时间
+2026-01-04
+
+## 涉及文件
+- `myenv.py`
+- `agent/replay_memory.py`
+- `agent/qvpo.py`
+
+## 问题现象
+训练曲线震荡严重，reward 难以稳定提升，表现为长期不收敛。
+
+## 根因分析
+`ReplayMemory.sample()` 使用全局 `numpy` 随机数生成器进行 batch 采样：
+
+`idxs = np.random.randint(...)`
+
+但 `myenv.py` 的 `reset(seed=...)` 里曾调用 `np.random.seed(seed)`，会在每个 episode 重置全局 RNG 状态。
+这会导致经验回放采样的随机序列被周期性重置，使得采样 batch 相关性增强，从而引起 Q 学习不稳定与训练震荡。
+
+## 解决方案
+### 1. 环境内部随机数改用 Gymnasium 的 `self.np_random`
+修改 `myenv.py`：
+- 移除 `np.random.seed(seed)`
+- 将环境内所有随机采样（初始化 UAV/用户位置、用户移动）改为 `self.np_random.uniform(...)`
+
+这样环境随机性与回放采样随机性相互独立，避免干扰训练。
+
+### 2. 增加 TensorBoard 诊断指标（便于定位震荡来源）
+修改 `agent/qvpo.py`：在训练中记录关键指标（定期写入 TensorBoard）：
+- `loss/critic`
+- `loss/actor`
+- `q/current_q1_mean`, `q/current_q2_mean`, `q/target_q_mean`
+- `q/reward_mean`
+-（若启用 `weighted`）`q/running_q_mean`, `q/running_q_std`
+
+## 当前结果
+修复后可避免回放采样被环境 reset 的全局 RNG 重置影响；通过新增 TensorBoard 指标可以进一步验证 critic/Q 值是否稳定以及定位剩余不收敛原因。
