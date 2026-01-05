@@ -1,5 +1,6 @@
 import argparse
 import copy
+from collections import deque
 
 import numpy as np
 import torch
@@ -39,6 +40,9 @@ def readParser():
 
     parser.add_argument('--num_steps', type=int, default=2500000, metavar='N',
                         help='env timesteps (default: 2500000)')
+
+    parser.add_argument('--start_steps', type=int, default=10000, metavar='N',
+                        help='random exploration steps before policy (default: 10000)')
 
     parser.add_argument('--batch_size', type=int, default=256, metavar='N',
                         help='batch size (default: 256)')
@@ -215,11 +219,14 @@ def main(args=None, logger=None, id=None):
     # 训练参数
     memory_size = 1e6
     num_steps = args.num_steps
-    start_steps = 25000
+    start_steps = args.start_steps
     eval_interval = 10000
     updates_per_step = 1
     batch_size = args.batch_size
     log_interval = 10
+
+    recent_rewards = deque(maxlen=100)
+    ema_reward = None
 
     # 创建经验池
     memory = ReplayMemory(state_size, action_size, memory_size, device)
@@ -277,6 +284,7 @@ def main(args=None, logger=None, id=None):
                 print(f"Evaluation at step {steps}")
                 print(f"{'='*60}")
                 tmp_result = evaluate(eval_env, agent, steps, source_env=env)
+                writer.add_scalar('reward/eval_mean', tmp_result, steps)
                 
                 if tmp_result > best_result:
                     best_result = tmp_result
@@ -286,8 +294,15 @@ def main(args=None, logger=None, id=None):
             state = next_state
 
         # Episode结束后的日志
+        recent_rewards.append(episode_reward)
+        ema_reward = episode_reward if ema_reward is None else (0.95 * ema_reward + 0.05 * episode_reward)
+
+        writer.add_scalar('reward/train', episode_reward, steps)
+        writer.add_scalar('reward/train_ma100', float(np.mean(recent_rewards)), steps)
+        writer.add_scalar('reward/train_ema', float(ema_reward), steps)
+
         if episodes % log_interval == 0:
-            writer.add_scalar('reward/train', episode_reward, steps)
+            pass
 
         print(f'Episode: {episodes:<4}  '
               f'Steps: {episode_steps:<4}  '
