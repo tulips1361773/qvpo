@@ -143,10 +143,72 @@ Feedback
 ### 2. 增加 TensorBoard 诊断指标（便于定位震荡来源）
 修改 `agent/qvpo.py`：在训练中记录关键指标（定期写入 TensorBoard）：
 - `loss/critic`
-- `loss/actor`
 - `q/current_q1_mean`, `q/current_q2_mean`, `q/target_q_mean`
 - `q/reward_mean`
 -（若启用 `weighted`）`q/running_q_mean`, `q/running_q_std`
 
 ## 当前结果
 修复后可避免回放采样被环境 reset 的全局 RNG 重置影响；通过新增 TensorBoard 指标可以进一步验证 critic/Q 值是否稳定以及定位剩余不收敛原因。
+
+
+---
+
+# 调优记录：Reward 平滑化消融实验（窃听聚合 top2 + 通信惩罚 softplus）
+## 修改时间
+2026-01-05
+
+## 背景
+训练中 `reward/train` 波动大、`loss/critic` 波动明显，怀疑主要来自 reward 中的 `max/hinge` 结构叠加“用户每步随机移动”带来的高方差，从而影响 Q 拟合与 `qadv` 权重稳定性。
+
+## 调优 1（消融）：窃听者聚合 max -> mean(top2)
+### 涉及文件
+- `myenv.py`
+- `main.py`
+
+### 修改动机
+原实现使用 `max(eavesdropper_snr_list)` 计算窃听者约束，最坏用户身份可能在多个用户间频繁切换，导致窃听惩罚项抖动，进而使总 reward 抖动。
+
+### 具体修改
+- `myenv.py::_calculate_reward()`：
+  - 将 `sensing_snr_eavesdropper = max(eavesdropper_snr_list)` 改为：
+    - `K>=2` 时取 `mean(top2)`（最大两个窃听 SNR 的均值）
+    - `K==1`/空列表时做安全退化
+- `main.py`：
+  - TensorBoard `log_dir` 追加 `run_id={id}`，避免多次训练覆盖同一目录导致只显示最新一次。
+
+### 观察到的现象（对比 baseline）
+- `reward/train_ema` 的收敛水平上移（策略平均回报更高）。
+- 但 `loss/critic` 波动变大且均值更高，`reward/train` 波动未显著降低。
+
+### 初步原因分析
+- `mean(top2)` 仅缓解 argmax 切换噪声，但 reward 的主要抖动可能来自通信阈值惩罚 + 用户随机移动。
+- `mean(top2)` 可能让窃听惩罚触发更频繁（更“严格”），使得 TD target 分布更复杂；同时回报/Q 尺度上移会使 MSE 数值变大。
+
+## 调优 2（消融）：通信惩罚 hinge -> softplus barrier，并按 K 归一化
+### 涉及文件
+- `myenv.py`
+- `main.py`
+
+### 修改动机
+通信惩罚对 `K` 个用户累加且为阈值型结构，用户随机移动导致频繁跨阈值，从而产生高方差；此外惩罚尺度会随 `K` 改变而改变，影响 Q 的数值稳定性。
+
+### 具体修改
+- `myenv.py::_calculate_reward()`：
+  - 将通信惩罚改为 softplus barrier：
+    - `gap = thr - snr_db`
+    - `softplus_gap = log(1+exp(kappa*gap))/kappa`
+    - 以 `softplus_gap - softplus(0)` 作为平滑的“超阈值缺口”，再乘系数得到惩罚
+  - 每用户惩罚做上限 `comm_penalty_cap_per_user`，总惩罚做上限 `comm_penalty_cap_total`
+  - 最终对 `K` 个用户惩罚做平均：`total_comm_penalty /= K`
+
+### 诊断日志增强
+- `myenv.py::step()`：返回 `info`，包含
+  - `eta_0`, `comm_penalty`, `eav_penalty`, `energy_penalty`, `boundary_penalty`, `reward_raw`, `reward_clip_1`, `reward_final`
+- `main.py`：每 `200` step 写入 TensorBoard：
+  - `reward_terms/*`（上述分项），用于定位抖动来源。
+
+## 下一步建议
+- 优先观察 `reward_terms/comm_penalty` 与 `reward_terms/eav_penalty` 的方差与尖刺，确认抖动主因。
+- 若 `loss/critic` 仍抖：
+  - 尝试更小的 `entropy_alpha`（如 0.01/0.005）或更快退火
+  - 提高 `policy_freq`（3~4）让 critic 更充分拟合再更新 actor

@@ -124,6 +124,37 @@ def readParser():
     
     parser.add_argument('--entropy_alpha', type=float, default=0.05, metavar='G', 
                         help="entropy_alpha (default: 0.05)")
+
+    parser.add_argument('--eav_agg', type=str, default='top2', choices=['max', 'top2', 'logsumexp'],
+                        help="eavesdropper SNR aggregation (default: top2)")
+    parser.add_argument('--eav_logsumexp_kappa', type=float, default=5.0, metavar='G',
+                        help="logsumexp kappa for eav_agg=logsumexp (default: 5.0)")
+    parser.add_argument('--eav_threshold', type=float, default=10.0, metavar='G',
+                        help="eavesdropper threshold in dB (default: 10.0)")
+    parser.add_argument('--eav_penalty_coef', type=float, default=3.0, metavar='G',
+                        help="eavesdropper penalty coefficient (default: 3.0)")
+    parser.add_argument('--eav_penalty_cap', type=float, default=20.0, metavar='G',
+                        help="eavesdropper penalty cap (default: 20.0)")
+
+    parser.add_argument('--comm_penalty', type=str, default='softplus', choices=['hinge', 'softplus', 'huber'],
+                        help="communication penalty type (default: softplus)")
+    parser.add_argument('--comm_threshold', type=float, default=10.0, metavar='G',
+                        help="communication threshold in dB (default: 10.0)")
+    parser.add_argument('--comm_penalty_coef', type=float, default=1.5, metavar='G',
+                        help="communication penalty coefficient (default: 1.5)")
+    parser.add_argument('--comm_softplus_kappa', type=float, default=5.0, metavar='G',
+                        help="softplus kappa for comm_penalty=softplus (default: 5.0)")
+    parser.add_argument('--comm_huber_delta', type=float, default=1.0, metavar='G',
+                        help="huber delta for comm_penalty=huber (default: 1.0)")
+    parser.add_argument('--comm_penalty_cap_per_user', type=float, default=15.0, metavar='G',
+                        help="communication penalty cap per user (default: 15.0)")
+    parser.add_argument('--comm_penalty_cap_total', type=float, default=30.0, metavar='G',
+                        help="communication penalty cap total (default: 30.0)")
+    parser.add_argument('--comm_penalty_avg_over_k', type=_str2bool, nargs='?', const=True, default=True,
+                        help="average communication penalty over K users (default: True)")
+
+    parser.add_argument('--load_id', type=str, default=None, metavar='S',
+                        help="optional model id to load from ./results before training")
     
     # f525f525f525                  
     if hasattr(argparse, 'BooleanOptionalAction'):
@@ -189,6 +220,8 @@ def main(args=None, logger=None, id=None):
     dir = "record"
     log_dir = os.path.join(dir, f'{args.env_name}', f'policy_type={args.policy_type}', 
                           f'ratio={args.ratio}', f'seed={args.seed}')
+    if id is not None:
+        log_dir = os.path.join(log_dir, f'run_id={id}')
     writer = SummaryWriter(log_dir)
 
     # 🔥🔥🔥 关键修改：直接实例化环境，传入归一化参数
@@ -199,10 +232,36 @@ def main(args=None, logger=None, id=None):
     env = UAVISACEnvironment(
         normalize_state=args.normalize_state,
         # normalize_reward=args.normalize_reward  # 注释掉这个参数
+        eav_agg=args.eav_agg,
+        eav_logsumexp_kappa=args.eav_logsumexp_kappa,
+        eav_threshold=args.eav_threshold,
+        eav_penalty_coef=args.eav_penalty_coef,
+        eav_penalty_cap=args.eav_penalty_cap,
+        comm_penalty_type=args.comm_penalty,
+        comm_threshold=args.comm_threshold,
+        comm_penalty_coef=args.comm_penalty_coef,
+        comm_softplus_kappa=args.comm_softplus_kappa,
+        comm_huber_delta=args.comm_huber_delta,
+        comm_penalty_cap_per_user=args.comm_penalty_cap_per_user,
+        comm_penalty_cap_total=args.comm_penalty_cap_total,
+        comm_penalty_avg_over_k=args.comm_penalty_avg_over_k,
     )
     
     eval_env = UAVISACEnvironment(
         normalize_state=args.normalize_state,
+        eav_agg=args.eav_agg,
+        eav_logsumexp_kappa=args.eav_logsumexp_kappa,
+        eav_threshold=args.eav_threshold,
+        eav_penalty_coef=args.eav_penalty_coef,
+        eav_penalty_cap=args.eav_penalty_cap,
+        comm_penalty_type=args.comm_penalty,
+        comm_threshold=args.comm_threshold,
+        comm_penalty_coef=args.comm_penalty_coef,
+        comm_softplus_kappa=args.comm_softplus_kappa,
+        comm_huber_delta=args.comm_huber_delta,
+        comm_penalty_cap_per_user=args.comm_penalty_cap_per_user,
+        comm_penalty_cap_total=args.comm_penalty_cap_total,
+        comm_penalty_avg_over_k=args.comm_penalty_avg_over_k,
     )
     
     # 获取状态和动作维度
@@ -236,6 +295,9 @@ def main(args=None, logger=None, id=None):
     print("Creating QVPO agent...")
     agent = QVPO(args, state_size, env.action_space, memory, diffusion_memory, device)
 
+    if args.load_id is not None:
+        agent.load_model(os.path.join('./results', prefix + '_' + name), id=args.load_id)
+
     steps = 0
     episodes = 0
     best_result = -float('inf')
@@ -260,6 +322,16 @@ def main(args=None, logger=None, id=None):
                 action = agent.sample_action(state, eval=False)
             
             next_state, reward, done, truncated, info = env.step(action)
+
+            if steps % 200 == 0:
+                writer.add_scalar('reward_terms/eta_0', float(info.get('eta_0', 0.0)), steps)
+                writer.add_scalar('reward_terms/comm_penalty', float(info.get('comm_penalty', 0.0)), steps)
+                writer.add_scalar('reward_terms/eav_penalty', float(info.get('eav_penalty', 0.0)), steps)
+                writer.add_scalar('reward_terms/energy_penalty', float(info.get('energy_penalty', 0.0)), steps)
+                writer.add_scalar('reward_terms/boundary_penalty', float(info.get('boundary_penalty', 0.0)), steps)
+                writer.add_scalar('reward_terms/reward_raw', float(info.get('reward_raw', 0.0)), steps)
+                writer.add_scalar('reward_terms/reward_clip_1', float(info.get('reward_clip_1', reward)), steps)
+                writer.add_scalar('reward_terms/reward_final', float(info.get('reward_final', reward)), steps)
 
             # mask计算
             mask = 0.0 if (done or truncated) else args.gamma

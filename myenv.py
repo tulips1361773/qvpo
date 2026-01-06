@@ -119,7 +119,13 @@ class StateNormalizer:
 class UAVISACEnvironment(gym.Env):
     def __init__(self, N=50, K=3, H=100, H1=50, l_max=100, sigma2=1e-14, delta_t: float = 4.0,
                  E_tot: float = 600000.0, energy_penalty: float = 10.0,
-                 normalize_state=True, normalize_reward=True):  # 🔥 新增开关
+                 normalize_state=True, normalize_reward=True,
+                 eav_agg: str = 'top2', eav_logsumexp_kappa: float = 5.0,
+                 eav_threshold: float = 10.0, eav_penalty_coef: float = 3.0, eav_penalty_cap: float = 20.0,
+                 comm_penalty_type: str = 'softplus', comm_threshold: float = 10.0, comm_penalty_coef: float = 1.5,
+                 comm_softplus_kappa: float = 5.0, comm_huber_delta: float = 1.0,
+                 comm_penalty_cap_per_user: float = 15.0, comm_penalty_cap_total: float = 30.0,
+                 comm_penalty_avg_over_k: bool = True):
         super(UAVISACEnvironment, self).__init__()
 
         # 时间设置
@@ -133,6 +139,21 @@ class UAVISACEnvironment(gym.Env):
         self.delta_t = delta_t
         self.E_tot = E_tot
         self.energy_penalty = energy_penalty
+
+        self.eav_agg = eav_agg
+        self.eav_logsumexp_kappa = eav_logsumexp_kappa
+        self.eav_threshold = eav_threshold
+        self.eav_penalty_coef = eav_penalty_coef
+        self.eav_penalty_cap = eav_penalty_cap
+
+        self.comm_penalty_type = comm_penalty_type
+        self.comm_threshold = comm_threshold
+        self.comm_penalty_coef = comm_penalty_coef
+        self.comm_softplus_kappa = comm_softplus_kappa
+        self.comm_huber_delta = comm_huber_delta
+        self.comm_penalty_cap_per_user = comm_penalty_cap_per_user
+        self.comm_penalty_cap_total = comm_penalty_cap_total
+        self.comm_penalty_avg_over_k = comm_penalty_avg_over_k
 
         # 无人机飞行范围约束
         self.X_min = -400.0
@@ -246,12 +267,21 @@ class UAVISACEnvironment(gym.Env):
         if new_uav_position[0] < self.X_min or new_uav_position[0] > self.X_max or new_uav_position[1] < self.Y_min or \
                 new_uav_position[1] > self.Y_max:
             reward = -20.0
+            info = {
+                'eta_0': 0.0,
+                'comm_penalty': 0.0,
+                'eav_penalty': 0.0,
+                'energy_penalty': 0.0,
+                'boundary_penalty': 20.0,
+                'reward_raw': -20.0,
+            }
         else:
-            reward = self._calculate_reward(new_uav_position, power_allocation)
+            reward, info = self._calculate_reward(new_uav_position, power_allocation)
             self.uav_position = new_uav_position
 
          # ✅ 新增：一级裁剪（防止奖励函数的极端值）
         reward = np.clip(reward, -50.0, 80.0)
+        info['reward_clip_1'] = float(reward)
 
         # 能耗计算
         horizontal_speed = abs(distance) / 4.0
@@ -259,9 +289,13 @@ class UAVISACEnvironment(gym.Env):
         self.total_energy += energy_t
         if self.total_energy > self.E_tot:
             reward -= self.energy_penalty
+            info['energy_penalty'] = float(self.energy_penalty)
+        else:
+            info['energy_penalty'] = 0.0
 
          # ✅ 新增：二级裁剪（能耗惩罚后的保护）
         reward = np.clip(reward, -60.0, 80.0)
+        info['reward_final'] = float(reward)
 
         # 计算奖励
         self.current_episode_reward += reward
@@ -300,34 +334,75 @@ class UAVISACEnvironment(gym.Env):
         # 更新前一个观察值
         self.prev_obs = current_obs.copy()
 
-        return combined_obs, reward, done, False, {}
+        return combined_obs, reward, done, False, info
 
     def _calculate_reward(self, uav_position, power_allocation):
         eta_0 = self._calculate_sensing_snr_legal(uav_position, power_allocation)
         reward = eta_0
-    
-        communication_threshold = 10.0
-        eavesdropper_threshold = 10.0
 
-        # ✅ 修改1：降低通信惩罚系数，并添加上限
-        total_comm_penalty = 0
+        total_comm_penalty = 0.0
         for k in range(self.K):
             distance = np.linalg.norm(uav_position - self.user_positions[k])
             snr = self._calculate_communication_snr(distance, power_allocation)
-            snr_gap = communication_threshold - snr
-            if snr_gap > 0:
-                total_comm_penalty += min(1.5 * snr_gap, 15.0)  # 原来2*，改为1.5*，上限15
-    
-        reward -= min(total_comm_penalty, 30.0)  # 总惩罚上限30
+            snr_gap = self.comm_threshold - snr
 
-        # ✅ 修改2：降低窃听惩罚系数
+            per_user_penalty = 0.0
+            if self.comm_penalty_type == 'hinge':
+                per_user_penalty = max(0.0, self.comm_penalty_coef * snr_gap)
+            elif self.comm_penalty_type == 'huber':
+                gap = max(0.0, snr_gap)
+                delta = max(float(self.comm_huber_delta), 1e-6)
+                if gap <= delta:
+                    per_user_penalty = self.comm_penalty_coef * (0.5 * (gap ** 2) / delta)
+                else:
+                    per_user_penalty = self.comm_penalty_coef * (gap - 0.5 * delta)
+            else:
+                softplus_gap = np.logaddexp(0.0, self.comm_softplus_kappa * snr_gap) / self.comm_softplus_kappa
+                softplus_0 = np.logaddexp(0.0, 0.0) / self.comm_softplus_kappa
+                per_user_penalty = self.comm_penalty_coef * (softplus_gap - softplus_0)
+                per_user_penalty = max(0.0, per_user_penalty)
+
+            total_comm_penalty += min(per_user_penalty, self.comm_penalty_cap_per_user)
+
+        if self.comm_penalty_avg_over_k and self.K > 0:
+            total_comm_penalty /= float(self.K)
+        comm_penalty = min(total_comm_penalty, self.comm_penalty_cap_total)
+        reward -= comm_penalty
+
         eavesdropper_snr_list = self._calculate_sensing_snr_eavesdropper(uav_position, power_allocation)
-        sensing_snr_eavesdropper = max(eavesdropper_snr_list)
-        snr_gap2 = sensing_snr_eavesdropper - eavesdropper_threshold
-        if snr_gap2 > 0:
-            reward -= min(3 * snr_gap2, 20.0)  # 原来5*，改为3*，上限20
+        if len(eavesdropper_snr_list) == 0:
+            sensing_snr_eavesdropper = 0.0
+        elif self.eav_agg == 'max':
+            sensing_snr_eavesdropper = float(np.max(np.array(eavesdropper_snr_list, dtype=np.float32)))
+        elif self.eav_agg == 'logsumexp':
+            x = np.array(eavesdropper_snr_list, dtype=np.float32)
+            kappa = float(self.eav_logsumexp_kappa)
+            kappa = max(kappa, 1e-6)
+            m = float(np.max(x))
+            sensing_snr_eavesdropper = m + (1.0 / kappa) * float(np.log(np.sum(np.exp(kappa * (x - m)))))
+        else:
+            if len(eavesdropper_snr_list) >= 2:
+                top2 = np.partition(np.array(eavesdropper_snr_list, dtype=np.float32), -2)[-2:]
+                sensing_snr_eavesdropper = float(np.mean(top2))
+            else:
+                sensing_snr_eavesdropper = float(eavesdropper_snr_list[0])
 
-        return reward
+        snr_gap2 = sensing_snr_eavesdropper - self.eav_threshold
+        eav_penalty = 0.0
+        if snr_gap2 > 0:
+            eav_penalty = min(self.eav_penalty_coef * snr_gap2, self.eav_penalty_cap)
+            reward -= eav_penalty
+
+        info = {
+            'eta_0': float(eta_0),
+            'comm_penalty': float(comm_penalty),
+            'eav_penalty': float(eav_penalty),
+            'energy_penalty': 0.0,
+            'boundary_penalty': 0.0,
+            'reward_raw': float(reward),
+        }
+
+        return reward, info
 
     def _calculate_communication_snr(self, distance, power_allocation):
         # 通信模型中的信道增益计算
