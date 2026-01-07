@@ -1,69 +1,4 @@
 
-markdown
-# 问题记录：mujoco_py 编译失败（X11/Xlib.h: No such file or directory）
-## 问题时间
-2025-12-31
-## 问题环境
-- OS：Ubuntu
-- Python：3.8（conda 环境 `qvpo`）
-- 相关库：gym, mujoco_py, MuJoCo 2.1.0 (`~/.mujoco/mujoco210`)
-## 问题描述
-运行命令：
-```bash
-python main.py --env_name HalfCheetah-v3 --weighted --aug
-程序在创建 MuJoCo 环境（如 HalfCheetah-v3）时崩溃，报错堆栈显示在导入 mujoco_py 时编译 C 扩展失败。
-
-关键错误信息
-text
-fatal error: X11/Xlib.h: No such file or directory
-   99 | #include <X11/Xlib.h>
-      |          ^~~~~~~~~~~~
-compilation terminated.
-distutils.errors.CompileError: command '/usr/bin/gcc' failed with exit code 1
-原因分析
-mujoco_py 在安装/首次导入时需要编译依赖 OpenGL 和 X11 的 C 扩展。
-系统未安装 X11 开发头文件（X11/Xlib.h），导致 GCC 编译失败。
-这是系统级依赖缺失问题，而不是 Python 代码逻辑问题。
-解决步骤
-安装系统依赖（Ubuntu）：
-bash
-sudo apt-get update
-sudo apt-get install -y \
-    build-essential \
-    libx11-dev \
-    libxi-dev \
-    libxmu-dev \
-    libglu1-mesa-dev \
-    libglew-dev \
-    libosmesa6-dev \
-    patchelf \
-    libglfw3 \
-    libglfw3-dev
-在 conda 环境中（qvpo）确认/重新安装 mujoco_py：
-bash
-conda activate qvpo
-pip install -U 'mujoco-py<2.2,>=2.1'
-重新运行命令：
-bash
-cd ~/sda/qvpo
-python main.py --env_name HalfCheetah-v3 --weighted --aug
-处理结果
-安装上述系统依赖后，mujoco_py 能够成功编译 C 扩展，HalfCheetah-v3 环境创建成功，程序可以正常运行训练。
-
- 
----
- 
-如果你按上面步骤执行后还有新的报错（比如换成别的缺失库），把新的终端输出贴出来，我再帮你逐条排查。
-Feedback
-
-
-
-为什么仍然报 X11/Xlib.h 错？
-因为 mujoco_py 的 C 扩展在编译时仍会 include eglplatform.h，而这个头文件默认依赖 X11 头文件；你设置的环境变量只影响运行时，不影响编译时的 include 路径和宏定义。
-
-
----
-
 # 修改记录：状态归一化（State Normalization）逻辑核查与修复
 ## 修改时间
 2026-01-03
@@ -191,15 +126,33 @@ Feedback
 
 ### 修改动机
 通信惩罚对 `K` 个用户累加且为阈值型结构，用户随机移动导致频繁跨阈值，从而产生高方差；此外惩罚尺度会随 `K` 改变而改变，影响 Q 的数值稳定性。
+从原来的“阈值型线性惩罚”改成了 softplus barrier，并做了 按 K 归一化,避免惩罚尺度随 K 变化.
 
 ### 具体修改
-- `myenv.py::_calculate_reward()`：
-  - 将通信惩罚改为 softplus barrier：
-    - `gap = thr - snr_db`
-    - `softplus_gap = log(1+exp(kappa*gap))/kappa`
-    - 以 `softplus_gap - softplus(0)` 作为平滑的“超阈值缺口”，再乘系数得到惩罚
-  - 每用户惩罚做上限 `comm_penalty_cap_per_user`，总惩罚做上限 `comm_penalty_cap_total`
-  - 最终对 `K` 个用户惩罚做平均：`total_comm_penalty /= K`
+原来的实现（hinge）
+```python
+if snr_gap > 0:
+    total_comm_penalty += min(1.5 * snr_gap, 15.0)  # 线性惩罚，每用户上限15
+reward -= min(total_comm_penalty, 30.0)           # 总上限30
+```
+
+现在的实现（softplus + /K）
+```python
+softplus_gap = np.logaddexp(0.0, comm_softplus_kappa * snr_gap) / comm_softplus_kappa
+softplus_0 = np.logaddexp(0.0, 0.0) / comm_softplus_kappa
+per_user_penalty = comm_penalty_coef * (softplus_gap - softplus_0)
+per_user_penalty = max(0.0, per_user_penalty)
+total_comm_penalty += min(per_user_penalty, comm_penalty_cap_per_user)
+if self.comm_penalty_avg_over_k and self.K > 0:
+    total_comm_penalty /= float(self.K)
+comm_penalty = min(total_comm_penalty, comm_penalty_cap_total)
+reward -= comm_penalty
+
+关键变化：
+
+惩罚函数：从 max(0, 1.5*gap) 改为 1.5 * (softplus(kappa*gap) - softplus(0))
+归一化：对 K 个用户的总惩罚做平均（/K），避免惩罚尺度随 K 变化
+保留上限：每用户上限 15.0，总上限 30.0
 
 ### 诊断日志增强
 - `myenv.py::step()`：返回 `info`，包含

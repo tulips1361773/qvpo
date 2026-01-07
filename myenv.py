@@ -118,14 +118,16 @@ class StateNormalizer:
 # ============================================================
 class UAVISACEnvironment(gym.Env):
     def __init__(self, N=50, K=3, H=100, H1=50, l_max=100, sigma2=1e-14, delta_t: float = 4.0,
-                 E_tot: float = 600000.0, energy_penalty: float = 10.0,
+                 E_tot: float = 25000.0, energy_penalty: float = 5.0,  # 降低能量阈值使其生效
                  normalize_state=True, normalize_reward=True,
-                 eav_agg: str = 'top2', eav_logsumexp_kappa: float = 5.0,
-                 eav_threshold: float = 10.0, eav_penalty_coef: float = 3.0, eav_penalty_cap: float = 20.0,
-                 comm_penalty_type: str = 'softplus', comm_threshold: float = 10.0, comm_penalty_coef: float = 1.5,
-                 comm_softplus_kappa: float = 5.0, comm_huber_delta: float = 1.0,
-                 comm_penalty_cap_per_user: float = 15.0, comm_penalty_cap_total: float = 30.0,
-                 comm_penalty_avg_over_k: bool = True):
+                 eav_agg: str = 'top2', eav_logsumexp_kappa: float = 1.0,  # 降低kappa使惩罚更平滑
+                 eav_threshold: float = 10.0, eav_penalty_coef: float = 1.0, eav_penalty_cap: float = 10.0,  # 降低惩罚系数
+                 comm_penalty_type: str = 'softplus', comm_threshold: float = 10.0, comm_penalty_coef: float = 0.5,  # 降低惩罚系数
+                 comm_softplus_kappa: float = 1.0, comm_huber_delta: float = 1.0,  # 降低kappa
+                 comm_penalty_cap_per_user: float = 5.0, comm_penalty_cap_total: float = 10.0,  # 降低cap
+                 comm_penalty_avg_over_k: bool = True,
+                 action_smooth_coef: float = 1.0, user_move_range: float = 20.0,  # 增大动作平滑惩罚权重 0.3→1.0
+                 reward_scale: float = 0.1):  # 新增：奖励缩放因子
         super(UAVISACEnvironment, self).__init__()
 
         # 时间设置
@@ -154,6 +156,11 @@ class UAVISACEnvironment(gym.Env):
         self.comm_penalty_cap_per_user = comm_penalty_cap_per_user
         self.comm_penalty_cap_total = comm_penalty_cap_total
         self.comm_penalty_avg_over_k = comm_penalty_avg_over_k
+        
+        # 新增参数
+        self.action_smooth_coef = action_smooth_coef
+        self.user_move_range = user_move_range
+        self.reward_scale = reward_scale
 
         # 无人机飞行范围约束
         self.X_min = -400.0
@@ -292,9 +299,18 @@ class UAVISACEnvironment(gym.Env):
             info['energy_penalty'] = float(self.energy_penalty)
         else:
             info['energy_penalty'] = 0.0
+        
+        # 新增：动作平滑惩罚（抑制Bang-Bang控制）
+        action_diff = action - self.prev_action
+        action_smooth_penalty = self.action_smooth_coef * np.sum(action_diff ** 2)
+        reward -= action_smooth_penalty
+        info['action_smooth_penalty'] = float(action_smooth_penalty)
 
-         # ✅ 新增：二级裁剪（能耗惩罚后的保护）
-        reward = np.clip(reward, -60.0, 80.0)
+        # 二级裁剪（能耗惩罚后的保护）
+        reward = np.clip(reward, -30.0, 50.0)  # 缩小裁剪范围
+        
+        # 奖励缩放（使奖励范围更适合RL训练）
+        reward = reward * self.reward_scale
         info['reward_final'] = float(reward)
 
         # 计算奖励
@@ -488,7 +504,7 @@ class UAVISACEnvironment(gym.Env):
             valid = False
 
             while not valid:
-                move_distance = self.np_random.uniform(0, 50)
+                move_distance = self.np_random.uniform(0, self.user_move_range)  # 使用可配置的移动范围
                 move_angle = self.np_random.uniform(-np.pi, np.pi)
 
                 delta_x = move_distance * np.cos(move_angle)

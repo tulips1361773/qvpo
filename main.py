@@ -83,8 +83,8 @@ def readParser():
     parser.add_argument('--alpha_mean', type=float, default=0.001, metavar='G',
                         help='running mean update weight (default: 0.001)')
 
-    parser.add_argument('--alpha_std', type=float, default=0.001, metavar='G',
-                        help='running std update weight (default: 0.001)')
+    parser.add_argument('--alpha_std', type=float, default=0.0005, metavar='G',
+                        help='running std update weight (default: 0.0005)')  # 降低更新率使 std 更稳定
 
     parser.add_argument('--beta', type=float, default=1.0, metavar='G',
                         help='expQ weight (default: 1.0)')
@@ -152,6 +152,14 @@ def readParser():
                         help="communication penalty cap total (default: 30.0)")
     parser.add_argument('--comm_penalty_avg_over_k', type=_str2bool, nargs='?', const=True, default=True,
                         help="average communication penalty over K users (default: True)")
+    
+    # 新增参数：动作平滑、用户移动范围、奖励缩放
+    parser.add_argument('--action_smooth_coef', type=float, default=1.0, metavar='G',
+                        help="action smoothness penalty coefficient (default: 1.0)")
+    parser.add_argument('--user_move_range', type=float, default=20.0, metavar='G',
+                        help="user movement range per step (default: 20.0)")
+    parser.add_argument('--reward_scale', type=float, default=0.1, metavar='G',
+                        help="reward scaling factor (default: 0.1)")
 
     parser.add_argument('--load_id', type=str, default=None, metavar='S',
                         help="optional model id to load from ./results before training")
@@ -231,7 +239,6 @@ def main(args=None, logger=None, id=None):
     
     env = UAVISACEnvironment(
         normalize_state=args.normalize_state,
-        # normalize_reward=args.normalize_reward  # 注释掉这个参数
         eav_agg=args.eav_agg,
         eav_logsumexp_kappa=args.eav_logsumexp_kappa,
         eav_threshold=args.eav_threshold,
@@ -245,6 +252,9 @@ def main(args=None, logger=None, id=None):
         comm_penalty_cap_per_user=args.comm_penalty_cap_per_user,
         comm_penalty_cap_total=args.comm_penalty_cap_total,
         comm_penalty_avg_over_k=args.comm_penalty_avg_over_k,
+        action_smooth_coef=args.action_smooth_coef,
+        user_move_range=args.user_move_range,
+        reward_scale=args.reward_scale,
     )
     
     eval_env = UAVISACEnvironment(
@@ -262,6 +272,9 @@ def main(args=None, logger=None, id=None):
         comm_penalty_cap_per_user=args.comm_penalty_cap_per_user,
         comm_penalty_cap_total=args.comm_penalty_cap_total,
         comm_penalty_avg_over_k=args.comm_penalty_avg_over_k,
+        action_smooth_coef=args.action_smooth_coef,
+        user_move_range=args.user_move_range,
+        reward_scale=args.reward_scale,
     )
     
     # 获取状态和动作维度
@@ -329,6 +342,7 @@ def main(args=None, logger=None, id=None):
                 writer.add_scalar('reward_terms/eav_penalty', float(info.get('eav_penalty', 0.0)), steps)
                 writer.add_scalar('reward_terms/energy_penalty', float(info.get('energy_penalty', 0.0)), steps)
                 writer.add_scalar('reward_terms/boundary_penalty', float(info.get('boundary_penalty', 0.0)), steps)
+                writer.add_scalar('reward_terms/action_smooth_penalty', float(info.get('action_smooth_penalty', 0.0)), steps)
                 writer.add_scalar('reward_terms/reward_raw', float(info.get('reward_raw', 0.0)), steps)
                 writer.add_scalar('reward_terms/reward_clip_1', float(info.get('reward_clip_1', reward)), steps)
                 writer.add_scalar('reward_terms/reward_final', float(info.get('reward_final', reward)), steps)
