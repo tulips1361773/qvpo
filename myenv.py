@@ -127,7 +127,12 @@ class UAVISACEnvironment(gym.Env):
                  comm_penalty_cap_per_user: float = 5.0, comm_penalty_cap_total: float = 10.0,  # 降低cap
                  comm_penalty_avg_over_k: bool = True,
                  action_smooth_coef: float = 1.0, user_move_range: float = 20.0,  # 增大动作平滑惩罚权重 0.3→1.0
-                 reward_scale: float = 0.1):  # 新增：奖励缩放因子
+                 reward_scale: float = 0.1,  # 奖励缩放因子
+                 # 建议1: 主奖励饱和函数参数
+                 sense_reward_type: str = 'tanh',  # 'linear', 'tanh', 'sigmoid'
+                 sense_reward_scale: float = 10.0,  # 饱和函数输出缩放
+                 sense_reward_center: float = 10.0,  # 饱和函数中心点 (eta_0 的参考值)
+                 sense_reward_slope: float = 5.0):  # 饱和函数斜率控制
         super(UAVISACEnvironment, self).__init__()
 
         # 时间设置
@@ -161,6 +166,12 @@ class UAVISACEnvironment(gym.Env):
         self.action_smooth_coef = action_smooth_coef
         self.user_move_range = user_move_range
         self.reward_scale = reward_scale
+        
+        # 建议1: 主奖励饱和函数参数
+        self.sense_reward_type = sense_reward_type
+        self.sense_reward_scale = sense_reward_scale
+        self.sense_reward_center = sense_reward_center
+        self.sense_reward_slope = sense_reward_slope
 
         # 无人机飞行范围约束
         self.X_min = -400.0
@@ -354,7 +365,16 @@ class UAVISACEnvironment(gym.Env):
 
     def _calculate_reward(self, uav_position, power_allocation):
         eta_0 = self._calculate_sensing_snr_legal(uav_position, power_allocation)
-        reward = eta_0
+        
+        # 建议1: 主奖励饱和函数 - 降低高SNR区域的边际收益，减少振荡
+        if self.sense_reward_type == 'tanh':
+            # tanh: 输出范围 [-scale, scale]，在 center 附近梯度最大
+            reward = self.sense_reward_scale * np.tanh((eta_0 - self.sense_reward_center) / self.sense_reward_slope)
+        elif self.sense_reward_type == 'sigmoid':
+            # sigmoid: 输出范围 [0, scale]
+            reward = self.sense_reward_scale * (2.0 / (1.0 + np.exp(-(eta_0 - self.sense_reward_center) / self.sense_reward_slope)) - 1.0)
+        else:  # 'linear'
+            reward = eta_0
 
         total_comm_penalty = 0.0
         for k in range(self.K):
@@ -409,8 +429,17 @@ class UAVISACEnvironment(gym.Env):
             eav_penalty = min(self.eav_penalty_coef * snr_gap2, self.eav_penalty_cap)
             reward -= eav_penalty
 
+        # 计算饱和后的感知奖励（用于日志记录）
+        if self.sense_reward_type == 'tanh':
+            sense_reward = self.sense_reward_scale * np.tanh((eta_0 - self.sense_reward_center) / self.sense_reward_slope)
+        elif self.sense_reward_type == 'sigmoid':
+            sense_reward = self.sense_reward_scale * (2.0 / (1.0 + np.exp(-(eta_0 - self.sense_reward_center) / self.sense_reward_slope)) - 1.0)
+        else:
+            sense_reward = eta_0
+        
         info = {
             'eta_0': float(eta_0),
+            'sense_reward': float(sense_reward),  # 饱和后的感知奖励
             'comm_penalty': float(comm_penalty),
             'eav_penalty': float(eav_penalty),
             'energy_penalty': 0.0,

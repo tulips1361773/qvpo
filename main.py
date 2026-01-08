@@ -160,6 +160,16 @@ def readParser():
                         help="user movement range per step (default: 20.0)")
     parser.add_argument('--reward_scale', type=float, default=0.1, metavar='G',
                         help="reward scaling factor (default: 0.1)")
+    
+    # 建议1: 主奖励饱和函数参数
+    parser.add_argument('--sense_reward_type', type=str, default='tanh', metavar='S',
+                        help="sense reward type: 'linear', 'tanh', 'sigmoid' (default: tanh)")
+    parser.add_argument('--sense_reward_scale', type=float, default=10.0, metavar='G',
+                        help="sense reward saturation scale (default: 10.0)")
+    parser.add_argument('--sense_reward_center', type=float, default=10.0, metavar='G',
+                        help="sense reward saturation center point (default: 10.0)")
+    parser.add_argument('--sense_reward_slope', type=float, default=5.0, metavar='G',
+                        help="sense reward saturation slope (default: 5.0)")
 
     parser.add_argument('--load_id', type=str, default=None, metavar='S',
                         help="optional model id to load from ./results before training")
@@ -255,6 +265,10 @@ def main(args=None, logger=None, id=None):
         action_smooth_coef=args.action_smooth_coef,
         user_move_range=args.user_move_range,
         reward_scale=args.reward_scale,
+        sense_reward_type=args.sense_reward_type,
+        sense_reward_scale=args.sense_reward_scale,
+        sense_reward_center=args.sense_reward_center,
+        sense_reward_slope=args.sense_reward_slope,
     )
     
     eval_env = UAVISACEnvironment(
@@ -275,6 +289,10 @@ def main(args=None, logger=None, id=None):
         action_smooth_coef=args.action_smooth_coef,
         user_move_range=args.user_move_range,
         reward_scale=args.reward_scale,
+        sense_reward_type=args.sense_reward_type,
+        sense_reward_scale=args.sense_reward_scale,
+        sense_reward_center=args.sense_reward_center,
+        sense_reward_slope=args.sense_reward_slope,
     )
     
     # 获取状态和动作维度
@@ -338,6 +356,7 @@ def main(args=None, logger=None, id=None):
 
             if steps % 200 == 0:
                 writer.add_scalar('reward_terms/eta_0', float(info.get('eta_0', 0.0)), steps)
+                writer.add_scalar('reward_terms/sense_reward', float(info.get('sense_reward', 0.0)), steps)  # 饱和后的感知奖励
                 writer.add_scalar('reward_terms/comm_penalty', float(info.get('comm_penalty', 0.0)), steps)
                 writer.add_scalar('reward_terms/eav_penalty', float(info.get('eav_penalty', 0.0)), steps)
                 writer.add_scalar('reward_terms/energy_penalty', float(info.get('energy_penalty', 0.0)), steps)
