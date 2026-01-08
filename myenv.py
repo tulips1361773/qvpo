@@ -295,8 +295,8 @@ class UAVISACEnvironment(gym.Env):
             reward, info = self._calculate_reward(new_uav_position, power_allocation)
             self.uav_position = new_uav_position
 
-         # ✅ 新增：一级裁剪（防止奖励函数的极端值）
-        reward = np.clip(reward, -50.0, 80.0)
+         # solu4: 修改第一次裁剪范围
+        reward = np.clip(reward, -20.0, 30.0)
         info['reward_clip_1'] = float(reward)
 
         # 能耗计算
@@ -315,8 +315,8 @@ class UAVISACEnvironment(gym.Env):
         reward -= action_smooth_penalty
         info['action_smooth_penalty'] = float(action_smooth_penalty)
 
-        # 二级裁剪（能耗惩罚后的保护）
-        reward = np.clip(reward, -30.0, 50.0)  # 缩小裁剪范围
+        # solu4: 删除第二次裁剪
+        # reward = np.clip(reward, -30.0, 50.0)
         
         # 奖励缩放（使奖励范围更适合RL训练）
         reward = reward * self.reward_scale
