@@ -32,6 +32,20 @@ sensing_snr_eavesdropper = m + (1/κ) * log(Σexp(κ*(x-m)))
 
 ## 代码修改
 
+### logsumexp 实现代码（已存在于 solu1）
+
+**位置**: `myenv.py:393-398`
+```python
+elif self.eav_agg == 'logsumexp':
+    x = np.array(eavesdropper_snr_list, dtype=np.float32)
+    kappa = float(self.eav_logsumexp_kappa)
+    kappa = max(kappa, 1e-6)
+    m = float(np.max(x))
+    sensing_snr_eavesdropper = m + (1.0 / kappa) * float(np.log(np.sum(np.exp(kappa * (x - m)))))
+```
+
+### 本次修改：将默认聚合方式改为 logsumexp
+
 1. **`myenv.py:123`** - 修改默认参数
 ```python
 # 修改前
