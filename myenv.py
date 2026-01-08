@@ -126,13 +126,13 @@ class UAVISACEnvironment(gym.Env):
                  comm_softplus_kappa: float = 1.0, comm_huber_delta: float = 1.0,  # 降低kappa
                  comm_penalty_cap_per_user: float = 5.0, comm_penalty_cap_total: float = 10.0,  # 降低cap
                  comm_penalty_avg_over_k: bool = True,
-                 action_smooth_coef: float = 1.0, user_move_range: float = 20.0,  # 增大动作平滑惩罚权重 0.3→1.0
-                 reward_scale: float = 0.1,  # 奖励缩放因子
+                 action_smooth_coef: float = 1.5, user_move_range: float = 20.0,  # 增大动作平滑惩罚权重 0.3→1.0
+                 reward_scale: float = 0.15,  # 奖励缩放因子
                  # 建议1: 主奖励饱和函数参数
                  sense_reward_type: str = 'tanh',  # 'linear', 'tanh', 'sigmoid'
-                 sense_reward_scale: float = 10.0,  # 饱和函数输出缩放
-                 sense_reward_center: float = 10.0,  # 饱和函数中心点 (eta_0 的参考值)
-                 sense_reward_slope: float = 5.0):  # 饱和函数斜率控制
+                 sense_reward_scale: float = 15.0,  # 饱和函数输出缩放  10
+                 sense_reward_center: float = 5.0,  # 饱和函数中心点 (eta_0 的参考值)  10
+                 sense_reward_slope: float = 8.0):  # 饱和函数斜率控制  5
         super(UAVISACEnvironment, self).__init__()
 
         # 时间设置

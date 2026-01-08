@@ -154,11 +154,11 @@ def readParser():
                         help="average communication penalty over K users (default: True)")
     
     # 新增参数：动作平滑、用户移动范围、奖励缩放
-    parser.add_argument('--action_smooth_coef', type=float, default=1.0, metavar='G',
+    parser.add_argument('--action_smooth_coef', type=float, default=1.5, metavar='G',
                         help="action smoothness penalty coefficient (default: 1.0)")
     parser.add_argument('--user_move_range', type=float, default=20.0, metavar='G',
                         help="user movement range per step (default: 20.0)")
-    parser.add_argument('--reward_scale', type=float, default=0.1, metavar='G',
+    parser.add_argument('--reward_scale', type=float, default=0.15, metavar='G',
                         help="reward scaling factor (default: 0.1)")
     
     # 建议1: 主奖励饱和函数参数
