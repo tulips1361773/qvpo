@@ -1,4 +1,5 @@
 # 基于solu2.md实验结果的分析
+policy_type=Diffusion/ratio=0.1/seed=42/run_id=26_01_07_22_41_29_0
 1. 实验配置概览
 本轮实验基于 ana1.txt 中的建议进行了修改，核心变动如下：
 奖励/惩罚调整：
@@ -42,7 +43,11 @@ Critic Loss (loss/critic):
 
 4. 修改提示 (Key Hints for Next Step)
 请结合代码和上述报告，重点分析以下问题：
+
 为何动作平滑惩罚无效？ Agent 为何选择“吃掉”平滑惩罚来进行高频操作？是惩罚系数（0.3）太低，还是因为 EAV/Comm 的惩罚函数梯度过大，导致 Agent 必须剧烈运动才能逃避更大的惩罚？（缓解问题或许可以考虑限制无人机步幅或者提高惩罚系数）
+
 Critic 难以收敛的根源： eav_penalty 的剧烈震荡是否引入了过大的方差，导致 Critic 无法学习到稳定的价值函数？
+
 Energy Penalty 彻底修复： 需要检查代码逻辑，确认 total_energy 的累积方式与 Episode 长度的关系，给出一个必定能生效的计算方案。
+
 下一步修改建议： 如何在不移除物理约束的前提下，进一步降低奖励函数的随机性（Reward Shaping），引导 Agent 走出目前的震荡局部优？

@@ -126,4 +126,4 @@ python main.py \
 
 ## 实验结果
 
-（待训练后填写）
+policy_type=Diffusion/ratio=0.1/seed=42/run_id=26_01_08_15_19_47_0

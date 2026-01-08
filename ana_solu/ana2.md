@@ -1,5 +1,5 @@
 # 对solu1修改后的实验结果分析
-policy_type=Diffusion/ratio=0.1/seed=42/run_id=26_01_07_22_41_29_0
+policy_type=Diffusion/ratio=0.1/seed=42/run_id=26_01_07_17_32_44_0
 ## 核心诊断摘要
 相较于之前的实验，模型在边界约束 (boundary_penalty) 和通信约束 (comm_penalty) 上表现出了更好的依从性。然而，当前实验面临三个新的严峻挑战：
 评估性能崩塌 (Evaluation Collapse): reward/eval_mean 在 70k 步后出现了显著的性能骤降，表明发生了过拟合或策略退化。
