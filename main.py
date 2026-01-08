@@ -83,8 +83,8 @@ def readParser():
     parser.add_argument('--alpha_mean', type=float, default=0.001, metavar='G',
                         help='running mean update weight (default: 0.001)')
 
-    parser.add_argument('--alpha_std', type=float, default=0.0005, metavar='G',
-                        help='running std update weight (default: 0.0005)')  # 降低更新率使 std 更稳定
+    parser.add_argument('--alpha_std', type=float, default=0.001, metavar='G',
+                        help='running std update weight (default: 0.001)')
 
     parser.add_argument('--beta', type=float, default=1.0, metavar='G',
                         help='expQ weight (default: 1.0)')
@@ -154,8 +154,8 @@ def readParser():
                         help="average communication penalty over K users (default: True)")
     
     # 新增参数：动作平滑、用户移动范围、奖励缩放
-    parser.add_argument('--action_smooth_coef', type=float, default=1.0, metavar='G',
-                        help="action smoothness penalty coefficient (default: 1.0)")
+    parser.add_argument('--action_smooth_coef', type=float, default=0.8, metavar='G',
+                        help="action smoothness penalty coefficient (default: 0.8)")
     parser.add_argument('--user_move_range', type=float, default=20.0, metavar='G',
                         help="user movement range per step (default: 20.0)")
     parser.add_argument('--reward_scale', type=float, default=0.1, metavar='G',

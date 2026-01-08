@@ -31,125 +31,163 @@ Guidance Scale 失调: 如果您在采样时使用了 Classifier-Free Guidance (
 采样步数与噪声: 扩散模型的训练是一个去噪过程。loss/actor 上升可能意味着模型在“高噪声”阶段（High Noise Level）的学习还算可以，但在“低噪声”精细控制阶段失败了，导致动作微操很差。
 下一步代码修改建议 (Request to AI)
 
-请根据上述分析，向 AI 提出以下具体的修改请求：
+下面是供参考的方案，没有结合具体代码！！请你结合代码分析，再考虑是否使用下面的方案：
 稳定 Lagrange 乘子 (eta_0):
-"请检查 eta_0 的更新逻辑。它目前的震荡幅度太大（0-18）。建议给 eta 设定一个上限（例如 clip at 5.0），或者降低 eta 的学习率（alpha learning rate）。"
+"请检查 eta_0 的更新逻辑。它目前的震荡幅度太大（0-18）。可以eta 设定一个上限（例如 clip at 5.0），或者降低 eta 的学习率（alpha learning rate）。"
 强化动作平滑约束:
-"观察到 action_smooth_penalty 随着训练不降反升。请修改 Reward 函数，显著增加 Action Smoothness 的惩罚权重。或者，在扩散模型的采样阶段（Inference time）加入后处理（如移动平均滤波）来强制平滑。"
+"观察到 action_smooth_penalty 随着训练不降反升。可以改 Reward 函数，显著增加 Action Smoothness 的惩罚权重。或者，在扩散模型的采样阶段（Inference time）加入后处理（如移动平均滤波）来强制平滑。"
 调整扩散模型的 Actor Loss:
 "Actor Loss 在后期呈现上升趋势。请检查 Actor 的 Loss 计算。如果是 BC Loss + lambda * Q_Loss 的形式，尝试减小 Q-Loss 的权重 lambda，防止 Critic 的高方差误导 Actor 的去噪过程。"
 解决 Critic 方差问题:
 "Q 值的标准差 q/running_q_std 持续升高。建议在计算 Target Q 时，增加 Target Action 的噪声平滑度（Target Policy Smoothing），或者检查 Reward Function 中是否存在某些极端大的瞬时奖励值。"
-补充信息包 (建议连同报告一起发给 AI):
+
+补充信息包 
 Env Info: UAV Control, Continuous Action.
 Observation: The oscillation of eta_0 correlates with the instability of the critic loss.
 Specific Concern: The action_smooth_penalty is rising, indicating the diffusion model is generating jerky trajectories.
 
 ---
 
-# 已实施的代码修改 (Run 3)
+# 代码深度分析与修改建议 (AI 分析)
 
-## 问题诊断总结
+## 问题根源分析
 
-| 问题 | 根因 | 解决方案 |
-|------|------|----------|
-| `action_smooth_penalty` 上升 | 动作平滑惩罚权重不足 | 增大 `action_smooth_coef`: 0.3 → 1.0 |
-| `running_q_std` 持续升高 | Q值方差更新无限制 | 限制 std 更新幅度和范围 [1, 20] |
-| Actor Loss 后期上升 | Q-guidance 权重过大导致冲突 | 对 q 权重 clip 到 [0, 5] |
-| Critic 不稳定 | 缺少 Target Policy Smoothing | 添加 TD3 风格的 target action 噪声 |
+### 1. `eta_0` 震荡 (0-18 dB) - **不需要修改**
 
----
+**代码位置**: `myenv.py:457-474`
 
-## 1. myenv.py 修改
+`eta_0` 是感知 SNR（dB），由雷达方程计算：`SNR ∝ 1/(d_t² × d_r²)`
 
-### 1.1 增大动作平滑惩罚权重（第129行）
+- 这是**环境物理特性**，不是 Lagrange 乘子
+- SNR 随 UAV 位置变化是正常的，反映了任务目标
+- **不应该 clip `eta_0`**，否则会破坏奖励信号的物理意义
+- 已有的 `reward_scale=0.1` 和奖励裁剪已经在控制其影响
 
-**修改前：**
+### 2. `action_smooth_penalty` 上升 - **需要增大权重**
+
+**代码位置**: `myenv.py:303-307`
+
 ```python
-action_smooth_coef: float = 0.3, user_move_range: float = 20.0,
+action_smooth_penalty = self.action_smooth_coef * np.sum(action_diff ** 2)
 ```
 
-**修改后：**
+**根因**：
+- 当前 `action_smooth_coef=0.3`，相对于 `eta_0`（0-18）太小
+- 扩散模型通过 Q-guidance 选择动作（`diffusion.py:158-163`），选 Q 值最高的
+- 如果 Critic 对"抖动动作"给出高 Q 值，Agent 会倾向于抖动
+
+**建议**：增大 `action_smooth_coef` 到 **0.8-1.0**
+
+### 3. Actor Loss 后期上升 - **需要限制 q 权重**
+
+**代码位置**: `qvpo.py:213-214`, `diffusion.py:226-240`
+
+Actor Loss 计算方式：
 ```python
-action_smooth_coef: float = 1.0, user_move_range: float = 20.0,  # 增大动作平滑惩罚权重 0.3→1.0
+# qvpo.py:230
+actor_loss = self.actor.loss(best_actions, states, weights=q)
+
+# diffusion.py:236
+loss = self.loss_fn(x_recon, noise, weights)  # Q-weighted denoising loss
 ```
 
----
+**根因**：
+- 这是 **Q-weighted BC loss**，不是 BC + λ*Q_loss
+- 当 `running_q_std` 上升时，q 权重分布变得极端
+- 使用 `qadv` 转换（`q_transform.py:43-50`）时，`adv = q - v`，方差大时 adv 分布极端
 
-## 2. agent/qvpo.py 修改
+**建议**：对 q 权重进行 clip，例如 `q = torch.clamp(q, min=0.0, max=5.0)`
 
-### 2.1 添加 Target Policy Smoothing（第166-170行）
+### 4. Critic 方差 (`running_q_std`) 持续上升 - **需要添加 Target Policy Smoothing**
 
-**修改前：**
+**代码位置**: `qvpo.py:166-172`
+
 ```python
 next_actions = self.actor_target(next_states, eval=False, q_func=self.critic_target)
 target_q1, target_q2 = self.critic_target(next_states, next_actions)
 target_q = torch.min(target_q1, target_q2)
 ```
 
-**修改后：**
+**根因**：
+- 当前代码**没有 Target Policy Smoothing**
+- 扩散模型生成的动作虽有随机性，但总是选 Q 最高的（结构化偏差）
+- 导致 Critic 对特定"高 Q"动作过拟合
+
+**建议**：添加 TD3 风格的 target action 噪声
+
+### 5. 评估性能崩塌 - **综合结果**
+
+这是上述问题的综合表现：Critic 方差大 → Q-guidance 不稳定 → 动作抖动 → 评估性能差
+
+---
+
+## 具体代码修改
+
+### 修改 1: `myenv.py` - 增大动作平滑惩罚
+
+**位置**: 第 129 行
+
+```python
+# 修改前
+action_smooth_coef: float = 0.3
+
+# 修改后
+action_smooth_coef: float = 0.8  # 增大权重，使平滑惩罚更显著
+```
+
+### 修改 2: `agent/qvpo.py` - 添加 Target Policy Smoothing
+
+**位置**: 第 166-167 行之间插入
+
 ```python
 next_actions = self.actor_target(next_states, eval=False, q_func=self.critic_target)
-# Target Policy Smoothing: 添加噪声平滑 target action，稳定 Critic 训练
-target_noise = torch.randn_like(next_actions) * 0.1  # 噪声标准差 0.1
-target_noise = target_noise.clamp(-0.2, 0.2)  # clip 噪声范围
+# === 新增：Target Policy Smoothing ===
+target_noise = torch.randn_like(next_actions) * 0.1
+target_noise = target_noise.clamp(-0.25, 0.25)
 next_actions = (next_actions + target_noise).clamp(-1.0, 1.0)
+# === 新增结束 ===
 target_q1, target_q2 = self.critic_target(next_states, next_actions)
-target_q = torch.min(target_q1, target_q2)
 ```
 
-### 2.2 限制 running_q_std 更新幅度和范围（第210-213行）
+### 修改 3: `agent/qvpo.py` - 限制 q 权重范围
 
-**修改前：**
+**位置**: 第 214 行之后插入
+
 ```python
+q = eval(self.q_transform)(q, q_neg=self.q_neg, cut=self.cut, ...)
+# === 新增：限制 q 权重范围 ===
+q = torch.clamp(q, min=0.0, max=5.0)
+# === 新增结束 ===
+```
+
+### 修改 4: `agent/qvpo.py` - 限制 running_q_std 更新
+
+**位置**: 第 210 行
+
+```python
+# 修改前
 self.running_q_std += self.alpha_std * (std - self.running_q_std)
-self.running_q_mean += self.alpha_mean * (mean - self.running_q_mean)
-```
 
-**修改后：**
-```python
-# 限制 running_q_std 的更新幅度，防止方差爆炸
-std_clipped = min(std, self.running_q_std * 1.5)  # 限制单次更新不超过1.5倍
-self.running_q_std += self.alpha_std * (std_clipped - self.running_q_std)
-self.running_q_std = max(1.0, min(self.running_q_std, 20.0))  # clip到[1, 20]
-self.running_q_mean += self.alpha_mean * (mean - self.running_q_mean)
-```
-
-### 2.3 对 q 权重进行 clip（第219行）
-
-**新增代码：**
-```python
-# 对 q 值进行标准化后再 clip，防止极端值影响扩散模型训练
-q = eval(self.q_transform)(q, ...)
-q = torch.clamp(q, min=0.0, max=5.0)  # 限制 q 权重范围，防止极端值
+# 修改后
+std_update = min(std, self.running_q_std * 2.0)  # 限制单次更新幅度
+self.running_q_std += self.alpha_std * (std_update - self.running_q_std)
+self.running_q_std = max(1.0, min(self.running_q_std, 15.0))  # clip 到 [1, 15]
 ```
 
 ---
 
-## 3. main.py 修改
+## 参数修改汇总
 
-### 3.1 更新默认参数
-
-| 参数 | 原值 | 新值 | 原因 |
-|------|------|------|------|
-| `--action_smooth_coef` | 0.3 | 1.0 | 增强动作平滑约束 |
-| `--alpha_std` | 0.001 | 0.0005 | 降低 std 更新率使其更稳定 |
-
----
-
-## 4. 参数修改汇总表
-
-| 参数/代码位置 | 原值 | 新值 | 修改原因 |
-|---------------|------|------|----------|
-| `action_smooth_coef` | 0.3 | 1.0 | 抑制扩散模型生成的抖动动作 |
-| `alpha_std` | 0.001 | 0.0005 | 降低 running_q_std 更新速度 |
-| `running_q_std` 范围 | 无限制 | [1, 20] | 防止 Q 值方差爆炸 |
-| q 权重范围 | 无限制 | [0, 5] | 防止极端 q 值误导 Actor |
-| Target Policy Smoothing | 无 | noise_std=0.1, clip=0.2 | 稳定 Critic 训练 |
+| 参数/代码 | 原值 | 建议值 | 原因 |
+|-----------|------|--------|------|
+| `action_smooth_coef` | 0.3 | 0.8 | 增强平滑约束，抑制抖动 |
+| `running_q_std` 范围 | 无限制 | [1, 15] | 防止 Q 值方差爆炸 |
+| q 权重范围 | 无限制 | [0, 5] | 防止极端权重误导去噪 |
+| Target Policy Smoothing | 无 | noise_std=0.1, clip=0.25 | 稳定 Critic 训练 |
 
 ---
 
-## 5. 推荐训练命令
+## 推荐训练命令
 
 ```bash
 python main.py \
@@ -177,27 +215,19 @@ python main.py \
   --weighted \
   --aug \
   --normalize_state True \
-  --action_smooth_coef 1.0 \
-  --alpha_std 0.0005 \
+  --action_smooth_coef 0.8 \
   --user_move_range 20.0 \
   --reward_scale 0.1 \
   --comm_penalty_coef 0.5 \
-  --comm_softplus_kappa 1.0 \
-  --eav_penalty_coef 1.0 \
   --start_steps 10000 \
   --cuda cuda:1
 ```
 
-**关键调整说明：**
-- `--action_smooth_coef 1.0`：增强动作平滑约束，抑制 Bang-Bang 控制
-- `--alpha_std 0.0005`：降低 Q 值方差更新速度，提高稳定性
-- Target Policy Smoothing 已在代码中硬编码启用
-
 ---
 
-## 6. 预期效果
+## 预期效果
 
-1. **`action_smooth_penalty` 应该下降或保持低位**：更强的平滑惩罚会迫使 Agent 生成更平滑的轨迹
-2. **`running_q_std` 应该稳定在 [1, 20] 范围内**：不再无限上升
-3. **Actor Loss 应该更稳定**：q 权重 clip 防止极端值干扰去噪过程
-4. **评估性能应该更稳定**：Target Policy Smoothing 减少 Critic 过拟合
+1. **`action_smooth_penalty` 应下降**：更强的惩罚迫使 Agent 生成平滑轨迹
+2. **`running_q_std` 应稳定**：不再无限上升，保持在 [1, 15] 范围
+3. **Actor Loss 应更稳定**：q 权重 clip 防止极端值干扰去噪
+4. **评估性能应更稳定**：Target Policy Smoothing 减少 Critic 过拟合

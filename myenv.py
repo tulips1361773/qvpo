@@ -126,7 +126,7 @@ class UAVISACEnvironment(gym.Env):
                  comm_softplus_kappa: float = 1.0, comm_huber_delta: float = 1.0,  # 降低kappa
                  comm_penalty_cap_per_user: float = 5.0, comm_penalty_cap_total: float = 10.0,  # 降低cap
                  comm_penalty_avg_over_k: bool = True,
-                 action_smooth_coef: float = 1.0, user_move_range: float = 20.0,  # 增大动作平滑惩罚权重 0.3→1.0
+                 action_smooth_coef: float = 0.8, user_move_range: float = 20.0,  # 增大动作平滑惩罚权重 0.3→0.8
                  reward_scale: float = 0.1):  # 新增：奖励缩放因子
         super(UAVISACEnvironment, self).__init__()
 

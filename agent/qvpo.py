@@ -165,8 +165,8 @@ class QVPO(object):
 
             next_actions = self.actor_target(next_states, eval=False, q_func=self.critic_target)
             # Target Policy Smoothing: 添加噪声平滑 target action，稳定 Critic 训练
-            target_noise = torch.randn_like(next_actions) * 0.1  # 噪声标准差 0.1
-            target_noise = target_noise.clamp(-0.2, 0.2)  # clip 噪声范围
+            target_noise = torch.randn_like(next_actions) * 0.1
+            target_noise = target_noise.clamp(-0.25, 0.25)
             next_actions = (next_actions + target_noise).clamp(-1.0, 1.0)
             target_q1, target_q2 = self.critic_target(next_states, next_actions)
             target_q = torch.min(target_q1, target_q2)
@@ -212,15 +212,15 @@ class QVPO(object):
                             q = torch.min(q1, q2)
                     # print("q shape", q.shape)
                     # 限制 running_q_std 的更新幅度，防止方差爆炸
-                    std_clipped = min(std, self.running_q_std * 1.5)  # 限制单次更新不超过1.5倍
-                    self.running_q_std += self.alpha_std * (std_clipped - self.running_q_std)
-                    self.running_q_std = max(1.0, min(self.running_q_std, 20.0))  # clip到[1, 20]
+                    std_update = min(std, self.running_q_std * 2.0)
+                    self.running_q_std += self.alpha_std * (std_update - self.running_q_std)
+                    self.running_q_std = max(1.0, min(self.running_q_std, 15.0))  # clip 到 [1, 15]
                     self.running_q_mean += self.alpha_mean * (mean - self.running_q_mean)
                     # q.clamp_(-self.q_neg).add_(self.q_neg)
-                    # 对 q 值进行标准化后再 clip，防止极端值影响扩散模型训练
                     q = eval(self.q_transform)(q, q_neg=self.q_neg, cut=self.cut, running_q_std=self.running_q_std, beta=self.beta,
                                                running_q_mean=self.running_q_mean, v=v, batch_size=batch_size, chosen=self.chosen)
-                    q = torch.clamp(q, min=0.0, max=5.0)  # 限制 q 权重范围，防止极端值
+                    # 限制 q 权重范围，防止极端值影响扩散模型训练
+                    q = torch.clamp(q, min=0.0, max=5.0)
                     if self.entropy_alpha > 0.0:
                         rand_states = states.unsqueeze(0).expand(10, -1, -1).contiguous().view(batch_size*self.chosen*10, -1)
                         rand_policy_actions = torch.empty(batch_size * self.chosen * 10, actions.shape[-1], device=self.device).uniform_(
