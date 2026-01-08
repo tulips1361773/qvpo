@@ -160,6 +160,14 @@ def readParser():
                         help="user movement range per step (default: 20.0)")
     parser.add_argument('--reward_scale', type=float, default=0.1, metavar='G',
                         help="reward scaling factor (default: 0.1)")
+    
+    # 建议3: 分项裁剪参数
+    parser.add_argument('--eta_clip_max', type=float, default=15.0, metavar='G',
+                        help="max clip value for sensing SNR (default: 15.0)")
+    parser.add_argument('--comm_penalty_clip_max', type=float, default=5.0, metavar='G',
+                        help="max clip value for comm penalty (default: 5.0)")
+    parser.add_argument('--eav_penalty_clip_max', type=float, default=5.0, metavar='G',
+                        help="max clip value for eav penalty (default: 5.0)")
 
     parser.add_argument('--load_id', type=str, default=None, metavar='S',
                         help="optional model id to load from ./results before training")
@@ -255,6 +263,9 @@ def main(args=None, logger=None, id=None):
         action_smooth_coef=args.action_smooth_coef,
         user_move_range=args.user_move_range,
         reward_scale=args.reward_scale,
+        eta_clip_max=args.eta_clip_max,
+        comm_penalty_clip_max=args.comm_penalty_clip_max,
+        eav_penalty_clip_max=args.eav_penalty_clip_max,
     )
     
     eval_env = UAVISACEnvironment(
@@ -275,6 +286,9 @@ def main(args=None, logger=None, id=None):
         action_smooth_coef=args.action_smooth_coef,
         user_move_range=args.user_move_range,
         reward_scale=args.reward_scale,
+        eta_clip_max=args.eta_clip_max,
+        comm_penalty_clip_max=args.comm_penalty_clip_max,
+        eav_penalty_clip_max=args.eav_penalty_clip_max,
     )
     
     # 获取状态和动作维度
@@ -346,6 +360,10 @@ def main(args=None, logger=None, id=None):
                 writer.add_scalar('reward_terms/reward_raw', float(info.get('reward_raw', 0.0)), steps)
                 writer.add_scalar('reward_terms/reward_clip_1', float(info.get('reward_clip_1', reward)), steps)
                 writer.add_scalar('reward_terms/reward_final', float(info.get('reward_final', reward)), steps)
+                # 建议3: 分项裁剪后的值
+                writer.add_scalar('reward_terms/eta_0_clipped', float(info.get('eta_0_clipped', 0.0)), steps)
+                writer.add_scalar('reward_terms/comm_penalty_clipped', float(info.get('comm_penalty_clipped', 0.0)), steps)
+                writer.add_scalar('reward_terms/eav_penalty_clipped', float(info.get('eav_penalty_clipped', 0.0)), steps)
 
             # mask计算
             mask = 0.0 if (done or truncated) else args.gamma

@@ -127,7 +127,11 @@ class UAVISACEnvironment(gym.Env):
                  comm_penalty_cap_per_user: float = 5.0, comm_penalty_cap_total: float = 10.0,  # 降低cap
                  comm_penalty_avg_over_k: bool = True,
                  action_smooth_coef: float = 0.8, user_move_range: float = 20.0,  # 增大动作平滑惩罚权重 0.3→0.8
-                 reward_scale: float = 0.1):  # 新增：奖励缩放因子
+                 reward_scale: float = 0.1,  # 奖励缩放因子
+                 # 建议3: 分项裁剪参数
+                 eta_clip_max: float = 15.0,  # 感知SNR裁剪上限
+                 comm_penalty_clip_max: float = 5.0,  # 通信惩罚裁剪上限
+                 eav_penalty_clip_max: float = 5.0):  # 窃听惩罚裁剪上限
         super(UAVISACEnvironment, self).__init__()
 
         # 时间设置
@@ -161,6 +165,11 @@ class UAVISACEnvironment(gym.Env):
         self.action_smooth_coef = action_smooth_coef
         self.user_move_range = user_move_range
         self.reward_scale = reward_scale
+        
+        # 建议3: 分项裁剪参数
+        self.eta_clip_max = eta_clip_max
+        self.comm_penalty_clip_max = comm_penalty_clip_max
+        self.eav_penalty_clip_max = eav_penalty_clip_max
 
         # 无人机飞行范围约束
         self.X_min = -400.0
@@ -354,7 +363,10 @@ class UAVISACEnvironment(gym.Env):
 
     def _calculate_reward(self, uav_position, power_allocation):
         eta_0 = self._calculate_sensing_snr_legal(uav_position, power_allocation)
-        reward = eta_0
+        
+        # 建议3: 分项裁剪 - 对感知SNR进行裁剪，避免极高SNR的边际收益过大
+        eta_0_clipped = np.clip(eta_0, 0.0, self.eta_clip_max)
+        reward = eta_0_clipped
 
         total_comm_penalty = 0.0
         for k in range(self.K):
@@ -383,7 +395,9 @@ class UAVISACEnvironment(gym.Env):
         if self.comm_penalty_avg_over_k and self.K > 0:
             total_comm_penalty /= float(self.K)
         comm_penalty = min(total_comm_penalty, self.comm_penalty_cap_total)
-        reward -= comm_penalty
+        # 建议3: 分项裁剪 - 对通信惩罚进行裁剪
+        comm_penalty_clipped = np.clip(comm_penalty, 0.0, self.comm_penalty_clip_max)
+        reward -= comm_penalty_clipped
 
         eavesdropper_snr_list = self._calculate_sensing_snr_eavesdropper(uav_position, power_allocation)
         if len(eavesdropper_snr_list) == 0:
@@ -407,12 +421,17 @@ class UAVISACEnvironment(gym.Env):
         eav_penalty = 0.0
         if snr_gap2 > 0:
             eav_penalty = min(self.eav_penalty_coef * snr_gap2, self.eav_penalty_cap)
-            reward -= eav_penalty
+            # 建议3: 分项裁剪 - 对窃听惩罚进行裁剪
+            eav_penalty_clipped = np.clip(eav_penalty, 0.0, self.eav_penalty_clip_max)
+            reward -= eav_penalty_clipped
 
         info = {
             'eta_0': float(eta_0),
+            'eta_0_clipped': float(eta_0_clipped),  # 建议3: 裁剪后的感知SNR
             'comm_penalty': float(comm_penalty),
+            'comm_penalty_clipped': float(comm_penalty_clipped),  # 建议3: 裁剪后的通信惩罚
             'eav_penalty': float(eav_penalty),
+            'eav_penalty_clipped': float(eav_penalty_clipped) if snr_gap2 > 0 else 0.0,  # 建议3: 裁剪后的窃听惩罚
             'energy_penalty': 0.0,
             'boundary_penalty': 0.0,
             'reward_raw': float(reward),
