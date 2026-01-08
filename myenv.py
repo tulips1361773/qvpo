@@ -120,7 +120,7 @@ class UAVISACEnvironment(gym.Env):
     def __init__(self, N=50, K=3, H=100, H1=50, l_max=100, sigma2=1e-14, delta_t: float = 4.0,
                  E_tot: float = 25000.0, energy_penalty: float = 5.0,  # 降低能量阈值使其生效
                  normalize_state=True, normalize_reward=True,
-                 eav_agg: str = 'top2', eav_logsumexp_kappa: float = 1.0,  # 降低kappa使惩罚更平滑
+                 eav_agg: str = 'logsumexp', eav_logsumexp_kappa: float = 0.5,  # 建议2: 使用logsumexp平滑聚合，降低kappa
                  eav_threshold: float = 10.0, eav_penalty_coef: float = 1.0, eav_penalty_cap: float = 10.0,  # 降低惩罚系数
                  comm_penalty_type: str = 'softplus', comm_threshold: float = 10.0, comm_penalty_coef: float = 0.5,  # 降低惩罚系数
                  comm_softplus_kappa: float = 1.0, comm_huber_delta: float = 1.0,  # 降低kappa

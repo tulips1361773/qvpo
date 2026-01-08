@@ -125,10 +125,10 @@ def readParser():
     parser.add_argument('--entropy_alpha', type=float, default=0.05, metavar='G', 
                         help="entropy_alpha (default: 0.05)")
 
-    parser.add_argument('--eav_agg', type=str, default='top2', choices=['max', 'top2', 'logsumexp'],
-                        help="eavesdropper SNR aggregation (default: top2)")
-    parser.add_argument('--eav_logsumexp_kappa', type=float, default=5.0, metavar='G',
-                        help="logsumexp kappa for eav_agg=logsumexp (default: 5.0)")
+    parser.add_argument('--eav_agg', type=str, default='logsumexp', choices=['max', 'top2', 'logsumexp'],
+                        help="eavesdropper SNR aggregation (default: logsumexp)")
+    parser.add_argument('--eav_logsumexp_kappa', type=float, default=0.5, metavar='G',
+                        help="logsumexp kappa for eav_agg=logsumexp (default: 0.5)")
     parser.add_argument('--eav_threshold', type=float, default=10.0, metavar='G',
                         help="eavesdropper threshold in dB (default: 10.0)")
     parser.add_argument('--eav_penalty_coef', type=float, default=3.0, metavar='G',
