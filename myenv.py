@@ -189,11 +189,14 @@ class UAVISACEnvironment(gym.Env):
             low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32
         )
         
+
+        # self.t1 = 0
+        # self.rresult = 0
+        # self.episode_rewards = []
+
         self.total_energy = 0.0
-        self.t1 = 0
-        self.rresult = 0
         self.current_episode_reward = 0
-        self.episode_rewards = []
+        
 
         # 初始化观察缓存
         self.prev_obs = None
@@ -337,14 +340,14 @@ class UAVISACEnvironment(gym.Env):
         done = False
         if self.current_slot == 50:
             done = True
-            if self.t1 < 500:
-                self.rresult += self.current_episode_reward / 50
-                self.t1 += 1
-            else:
-                average_rresult = self.rresult / 500
-                self.episode_rewards.append(average_rresult)
-                self.rresult = 0
-                self.t1 = 0
+            # if self.t1 < 500:
+            #     self.rresult += self.current_episode_reward / 50
+            #     self.t1 += 1
+            # else:
+            #     average_rresult = self.rresult / 500
+            #     self.episode_rewards.append(average_rresult)
+            #     self.rresult = 0
+            #     self.t1 = 0
         
         # 获取当前观察值
         current_obs = self._get_obs()
