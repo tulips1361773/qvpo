@@ -223,3 +223,47 @@ Solu3(2)成功: 通过算法修正恢复性能，但仍受限于底层代码问�
 回退窃听者聚合: 保持top2的物理合理性
 ### 预期成果
 Solu4应在60k步收敛至eval_mean=42-46，超越所有前序版本，且训练曲线更稳定(Q_std<5, Critic_loss<10)。
+
+
+## reward缩放保持0.1
+python main.py \
+  --env_name Env \
+  --seed 42 \
+  --num_steps 200000 \
+  --batch_size 256 \
+  --gamma 0.99 \
+  --tau 0.005 \
+  --diffusion_lr 0.0001 \
+  --critic_lr 0.0001 \
+  --n_timesteps 20 \
+  --beta_schedule cosine \
+  --entropy_alpha 0.02 \
+  --train_sample 32 \
+  --behavior_sample 8 \
+  --target_sample 2 \
+  --eval_sample 16 \
+  --ac_grad_norm 1.0 \
+  --q_transform qadv \
+  --chosen 1 \
+  --q_neg 0.001 \
+  --cut 0.8 \
+  --policy_freq 2 \
+  --weighted \
+  --aug \
+  --normalize_state True \
+  --action_smooth_coef 0.1 \
+  --user_move_range 20.0 \
+  --reward_scale 0.1 \
+  --eav_agg top2 \
+  --eav_threshold 10.0 \
+  --eav_penalty_coef 3.0 \
+  --eav_penalty_cap 20.0 \
+  --comm_penalty softplus \
+  --comm_threshold 10.0 \
+  --comm_penalty_coef 1.5 \
+  --comm_softplus_kappa 5.0 \
+  --comm_penalty_cap_per_user 15.0 \
+  --comm_penalty_cap_total 30.0 \
+  --comm_penalty_avg_over_k True \
+  --start_steps 10000 \
+  --cuda cuda:1
