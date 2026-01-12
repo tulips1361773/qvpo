@@ -121,7 +121,7 @@ class UAVISACEnvironment(gym.Env):
                  E_tot: float = 25000.0, energy_penalty: float = 5.0,  # 降低能量阈值使其生效
                  normalize_state=True, normalize_reward=True,
                  eav_agg: str = 'logsumexp', eav_logsumexp_kappa: float = 0.5,  # 建议2: 使用logsumexp平滑聚合，降低kappa
-                 eav_threshold: float = 10.0, eav_penalty_coef: float = 1.0, eav_penalty_cap: float = 10.0,  # 降低惩罚系数
+                 eav_threshold: float = 10.0, eav_penalty_coef: float = 5.0, eav_penalty_cap: float = 20.0,  # 降低惩罚系数
                  comm_penalty_type: str = 'softplus', comm_threshold: float = 10.0, comm_penalty_coef: float = 0.5,  # 降低惩罚系数
                  comm_softplus_kappa: float = 1.0, comm_huber_delta: float = 1.0,  # 降低kappa
                  comm_penalty_cap_per_user: float = 5.0, comm_penalty_cap_total: float = 10.0,  # 降低cap
@@ -282,48 +282,54 @@ class UAVISACEnvironment(gym.Env):
         new_uav_position[0] += delta_x
         new_uav_position[1] += delta_y
 
-        # 确保无人机位置在允许范围内
-        if new_uav_position[0] < self.X_min or new_uav_position[0] > self.X_max or new_uav_position[1] < self.Y_min or \
-                new_uav_position[1] > self.Y_max:
-            reward = -20.0
+        # 1. 边界处理逻辑优化
+        if new_uav_position[0] < self.X_min or new_uav_position[0] > self.X_max or \
+           new_uav_position[1] < self.Y_min or new_uav_position[1] > self.Y_max:
+            raw_reward = -50.0 
+            
+            # 构造 info
             info = {
-                'eta_0': 0.0,
-                'comm_penalty': 0.0,
-                'eav_penalty': 0.0,
+                'eta_0': 0.0, 'eta_0_clipped': 0.0,
+                'comm_penalty': 0.0, 'comm_penalty_clipped': 0.0,
+                'eav_penalty': 0.0, 'eav_penalty_clipped': 0.0,
                 'energy_penalty': 0.0,
-                'boundary_penalty': 20.0,
-                'reward_raw': -20.0,
+                'boundary_penalty': 50.0, # 记录绝对值用于日志
+                'action_smooth_penalty': 0.0,
+                'reward_raw': -50.0,
             }
+            
+            # 【可选】如果希望越界直接结束回合，取消注释下面这行：
+            # self.current_slot = 49 # 强制下一次 check done 为 True
+            
         else:
-            reward, info = self._calculate_reward(new_uav_position, power_allocation)
+            # 2. 正常奖励计算
+            # calculate_reward 内部已经包含了 eta, comm, eav 的计算和分项 Clip
+            # 注意：calculate_reward 应该返回 raw_reward (未缩放的值)
+            raw_reward, info = self._calculate_reward(new_uav_position, power_allocation)
             self.uav_position = new_uav_position
 
-         # solu4: 修改第一次裁剪范围
-        reward = np.clip(reward, -20.0, 30.0)
-        info['reward_clip_1'] = float(reward)
-
-        # 能耗计算
+        # 4. 能耗惩罚 (保持不变)
         horizontal_speed = abs(distance) / 4.0
         energy_t = calc_energy(horizontal_speed, self.delta_t)
         self.total_energy += energy_t
         if self.total_energy > self.E_tot:
-            reward -= self.energy_penalty
+            raw_reward -= self.energy_penalty
             info['energy_penalty'] = float(self.energy_penalty)
         else:
             info['energy_penalty'] = 0.0
         
-        # 新增：动作平滑惩罚（抑制Bang-Bang控制）
+        # 5. 动作平滑惩罚 (保持不变)
         action_diff = action - self.prev_action
         action_smooth_penalty = self.action_smooth_coef * np.sum(action_diff ** 2)
-        reward -= action_smooth_penalty
+        raw_reward -= action_smooth_penalty
         info['action_smooth_penalty'] = float(action_smooth_penalty)
 
-        # solu4: 删除第二次裁剪
-        # reward = np.clip(reward, -30.0, 50.0)
-        
-        # 奖励缩放（使奖励范围更适合RL训练）
-        reward = reward * self.reward_scale
-        info['reward_final'] = float(reward)
+        # 记录未经缩放的最终奖励，便于在 TensorBoard 中观察真实物理意义的得分
+        info['reward_final_unscaled'] = float(raw_reward)
+
+        # 6. 最终缩放 (Scaling)
+        reward = raw_reward * self.reward_scale
+        info['reward_final'] = float(reward) # 这是给 Agent 看的奖励
 
         # 计算奖励
         self.current_episode_reward += reward
