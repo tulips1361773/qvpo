@@ -34,83 +34,72 @@ def calc_energy(
 
 
 # ============================================================
-# 改进版：状态归一化器类（完整版）
+# 优化版：状态归一化器类 (Standard Welford Implementation)
 # ============================================================
 class StateNormalizer:
-    """在线运行时状态归一化器（Running Mean & Std）"""
-    def __init__(self, state_dim, epsilon=1e-8, clip_range=10.0):
+    """
+    基于 Welford 算法的标准在线归一化器。
+    相比原版：数值更稳定，移除复杂的 batch 合并逻辑，修正初始化问题。
+    """
+    def __init__(self, state_dim, epsilon=1e-4, clip_range=10.0):
         self.state_dim = state_dim
         self.epsilon = epsilon
         self.clip_range = clip_range
         
         # 统计量
         self.mean = np.zeros(state_dim, dtype=np.float64)
-        self.var = np.ones(state_dim, dtype=np.float64)
-        self.count = epsilon  # 避免除零
+        # M2 用于记录 (x - mean)^2 的累积和，用于计算方差
+        self.M2 = np.zeros(state_dim, dtype=np.float64) 
+        self.var = np.ones(state_dim, dtype=np.float64) # 默认为1，避免初期除0
+        self.count = 0.0
         
-        # ✅ 新增：训练模式开关
+        # 训练模式开关
         self.training = True
         
     def update(self, state):
-        """更新统计量（Welford's online algorithm）"""
-        state = np.asarray(state, dtype=np.float64)
-        batch_mean = state
-        batch_var = np.zeros_like(state)
-        batch_count = 1
+        """
+        使用 Welford 算法更新统计量
+        针对单个样本或 Batch 均可，这里假设输入为单个 state (shape: [dim])
+        """
+        x = np.asarray(state, dtype=np.float64)
         
-        # 增量更新
-        delta = batch_mean - self.mean
-        total_count = self.count + batch_count
+        self.count += 1
         
-        new_mean = self.mean + delta * batch_count / total_count
-        m_a = self.var * self.count
-        m_b = batch_var * batch_count
-        M2 = m_a + m_b + np.square(delta) * self.count * batch_count / total_count
-        new_var = M2 / total_count
+        # Welford 核心公式
+        delta = x - self.mean
+        self.mean += delta / self.count
+        delta2 = x - self.mean
+        self.M2 += delta * delta2
         
-        self.mean = new_mean
-        self.var = new_var
-        self.count = total_count
+        # 计算方差 (样本方差除以 n-1，总体方差除以 n，这里用 n 即可，RL中差异不大)
+        if self.count > 1:
+            self.var = self.M2 / self.count
         
     def normalize(self, state, update_stats=None):
         """
         归一化状态
-        
-        Args:
-            state: 输入状态
-            update_stats: 
-                - None: 根据 self.training 决定是否更新统计量
-                - True: 强制更新统计量
-                - False: 强制不更新统计量
         """
-        # ✅ 改进点1：根据训练模式自动决定是否更新
+        # 自动决定是否更新
         if update_stats is None:
             update_stats = self.training
         
-        state = np.asarray(state, dtype=np.float32)
-        
+        # 如果是训练模式，先更新统计量
         if update_stats:
             self.update(state)
         
-        # ✅ 改进点2：动态epsilon，初期更保守
-        adaptive_epsilon = max(self.epsilon, 0.01 / (1 + self.count/1000))
-        std = np.sqrt(self.var) + adaptive_epsilon
+        # 执行归一化
+        # 加上 epsilon 防止除零 (var 可能极小)
+        std = np.sqrt(self.var + self.epsilon)
         normalized = (state - self.mean) / std
         
-        # Clip 防止极端值
+        # Clip 防止极端值破坏梯度
         normalized = np.clip(normalized, -self.clip_range, self.clip_range)
         
         return normalized.astype(np.float32)
     
-    # ✅ 新增：模式切换方法
     def set_training(self, mode):
-        """
-        切换训练/评估模式
-        
-        Args:
-            mode: True表示训练模式，False表示评估模式
-        """
         self.training = mode
+
 
 
 # ============================================================
