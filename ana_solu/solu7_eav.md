@@ -8,12 +8,12 @@
 python main.py \
   --env_name Env \
   --seed 42 \
-  --num_steps 200000 \
-  --batch_size 256 \
+  --num_steps 250000 \
+  --batch_size 512 \
   --gamma 0.99 \
   --tau 0.005 \
   --diffusion_lr 0.0001 \
-  --critic_lr 0.0001 \
+  --critic_lr 0.0004 \
   --n_timesteps 20 \
   --beta_schedule cosine \
   --entropy_alpha 0.05 \
@@ -45,4 +45,4 @@ python main.py \
   --comm_penalty_cap_total 30.0 \
   --comm_penalty_avg_over_k True \
   --start_steps 10000 \
-  --cuda cuda:1
+  --cuda cuda:0
