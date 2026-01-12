@@ -428,6 +428,7 @@ class UAVISACEnvironment(gym.Env):
             'eta_0_clipped': float(eta_0_clipped),  # 建议3: 裁剪后的感知SNR
             'comm_penalty': float(comm_penalty),
             'comm_penalty_clipped': float(comm_penalty_clipped),  # 建议3: 裁剪后的通信惩罚
+            'snr_gap2':float(snr_gap2),
             'eav_penalty': float(eav_penalty),
             'eav_penalty_clipped': float(eav_penalty_clipped) if snr_gap2 > 0 else 0.0,  # 建议3: 裁剪后的窃听惩罚
             'energy_penalty': 0.0,

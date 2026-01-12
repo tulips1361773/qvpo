@@ -1,0 +1,48 @@
+## 发现原因是 snr*coaf>=20,因此裁剪后的惩罚全部从》20变为5，无法区分好坏。
+因此coaf=0.5，记录snr原始值，在确定eav的参数取值
+  --eav_penalty_coef 0.5 \
+  --eav_penalty_cap 20.0 \
+  --eav_penalty_clip_max
+
+
+python main.py \
+  --env_name Env \
+  --seed 42 \
+  --num_steps 200000 \
+  --batch_size 256 \
+  --gamma 0.99 \
+  --tau 0.005 \
+  --diffusion_lr 0.0001 \
+  --critic_lr 0.0001 \
+  --n_timesteps 20 \
+  --beta_schedule cosine \
+  --entropy_alpha 0.05 \
+  --train_sample 32 \
+  --behavior_sample 8 \
+  --target_sample 2 \
+  --eval_sample 16 \
+  --ac_grad_norm 1.0 \
+  --q_transform qadv \
+  --chosen 1 \
+  --q_neg 0.001 \
+  --cut 0.8 \
+  --policy_freq 2 \
+  --weighted \
+  --aug \
+  --normalize_state True \
+  --action_smooth_coef 0.1 \
+  --user_move_range 20.0 \
+  --reward_scale 0.1 \
+  --eav_agg top2 \
+  --eav_threshold 10.0 \
+  --eav_penalty_coef 0.5 \
+  --eav_penalty_cap 20.0 \
+  --comm_penalty softplus \
+  --comm_threshold 10.0 \
+  --comm_penalty_coef 1.5 \
+  --comm_softplus_kappa 5.0 \
+  --comm_penalty_cap_per_user 15.0 \
+  --comm_penalty_cap_total 30.0 \
+  --comm_penalty_avg_over_k True \
+  --start_steps 10000 \
+  --cuda cuda:1

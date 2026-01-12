@@ -138,7 +138,7 @@ boundary_penalty	(硬编码 -20)	(硬编码 -50)	让越界成为不可接受的�
   --start_steps 10000 \
   --cuda cuda:1
 
-# 命令4  更大学习率  4e-3
+# 命令4  更大学习率  4e-4
   python main.py \
   --env_name Env \
   --seed 42 \
