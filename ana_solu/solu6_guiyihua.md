@@ -89,8 +89,8 @@ python main.py \
   --start_steps 10000 \
   --cuda cuda:1
 
-  ## 对比实验(还没跑)
-  ### 512+10k+4e-4
+  ## 对比实验(和solu7.(2)实验重复了)
+  ### 512+10k+4e-4+coef1
   python main.py \
   --env_name Env \
   --seed 42 \
@@ -121,7 +121,7 @@ python main.py \
   --reward_scale 0.1 \
   --eav_agg top2 \
   --eav_threshold 10.0 \
-  --eav_penalty_coef 5.0 \
+  --eav_penalty_coef 1.0 \
   --eav_penalty_cap 20.0 \
   --comm_penalty softplus \
   --comm_threshold 10.0 \

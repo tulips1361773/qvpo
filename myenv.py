@@ -120,7 +120,7 @@ class UAVISACEnvironment(gym.Env):
                  # 建议3: 分项裁剪参数
                  eta_clip_max: float = 15.0,  # 感知SNR裁剪上限
                  comm_penalty_clip_max: float = 5.0,  # 通信惩罚裁剪上限
-                 eav_penalty_clip_max: float = 5.0):  # 窃听惩罚裁剪上限
+                 eav_penalty_clip_max: float = 8.0):  # 窃听惩罚裁剪上限
         super(UAVISACEnvironment, self).__init__()
 
         # 时间设置
