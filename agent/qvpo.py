@@ -7,7 +7,8 @@ import torch.nn.functional as F
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
 from agent.model import MLP, Critic
-from agent.diffusion import Diffusion
+# from agent.diffusion import Diffusion
+from agent.flow_matching import FlowMatchingPolicy
 from agent.vae import VAE
 from agent.helpers import EMA
 from agent.q_transform import *
@@ -26,10 +27,27 @@ class QVPO(object):
         action_dim = np.prod(action_space.shape)
 
         self.policy_type = args.policy_type
-        if self.policy_type == 'Diffusion':
-            self.actor = Diffusion(state_dim=state_dim, action_dim=action_dim, noise_ratio=args.noise_ratio,
+        
+        # 🔥 修改点：兼容 Diffusion 和 FlowMatching
+        if self.policy_type == 'Diffusion' or self.policy_type == 'FlowMatching':
+            
+            if self.policy_type == 'FlowMatching':
+                # 使用我们新建的 FlowMatchingPolicy
+                from agent.flow_matching import FlowMatchingPolicy
+                self.actor = FlowMatchingPolicy(
+                    state_dim=state_dim, 
+                    action_dim=action_dim, 
+                    n_timesteps=args.n_timesteps, # 推理步数
+                    device=device
+                ).to(device)
+            else:
+                # 保留原来的 Diffusion 以备对比实验
+                from agent.diffusion import Diffusion
+                self.actor = Diffusion(state_dim=state_dim, action_dim=action_dim, noise_ratio=args.noise_ratio,
                                    beta_schedule=args.beta_schedule, n_timesteps=args.n_timesteps, behavior_sample=args.behavior_sample,
                                    eval_sample=args.eval_sample, deterministic=args.deterministic).to(device)
+
+            # 🔥🔥🔥 必须保留的参数赋值（之前报错就是因为这里没赋值）
             self.running_q_std = 1.0
             self.running_q_mean = 0.0
             self.beta = args.beta
@@ -39,7 +57,7 @@ class QVPO(object):
             self.q_neg = args.q_neg
 
             self.weighted = args.weighted
-            self.aug = args.aug
+            self.aug = args.aug  # <--- 就是这行救了命
             self.train_sample = args.train_sample
 
             self.q_transform = args.q_transform
