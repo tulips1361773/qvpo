@@ -4,7 +4,7 @@
   --eav_penalty_cap 20.0 \
   --eav_penalty_clip_max
 
-
+# 选中效果！！！
 python main.py \
   --env_name Env \
   --seed 42 \

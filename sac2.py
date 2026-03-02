@@ -4,6 +4,7 @@ import random
 import time
 import datetime
 from distutils.util import strtobool
+from collections import deque
 
 import gymnasium as gym
 import numpy as np
@@ -13,11 +14,12 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
 
+# 🔥 修改：导入你为 SAC 准备的无归一化环境
+# 假设你的新环境文件叫 myenv2.py，类名依然是 UAVISACEnvironment
 from myenv2 import UAVISACEnvironment
 
 # ============================================================
-# 🔥 新增：Welford 算法实现的 RunningMeanStd
-# 用于在 Agent 端进行稳定的状态归一化
+# Agent 端状态归一化 (替代环境内部的归一化)
 # ============================================================
 class RunningMeanStd:
     def __init__(self, shape, epsilon=1e-4, clip=10.0):
@@ -27,7 +29,6 @@ class RunningMeanStd:
         self.clip = clip
 
     def update(self, x):
-        """更新均值和方差，支持单个样本或batch"""
         if x.ndim == 1:
             x = x.reshape(1, -1)
         batch_mean = np.mean(x, axis=0)
@@ -51,55 +52,109 @@ class RunningMeanStd:
         self.count = new_count
 
     def normalize(self, x):
-        """归一化：(x - mean) / std"""
+        # (x - mean) / std
         return np.clip((x - self.mean) / np.sqrt(self.var + 1e-8), -self.clip, self.clip).astype(np.float32)
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    # 实验设置
+    # ==========================================
+    # 实验基础设置
+    # ==========================================
     parser.add_argument("--exp-name", type=str, default="sac_uav", help="experiment name")
-    parser.add_argument("--seed", type=int, default=42, help="seed of the experiment")
+    parser.add_argument("--seed", type=int, default=1, help="seed of the experiment")
     parser.add_argument("--torch-deterministic", type=lambda x: bool(strtobool(x)), default=True, help="deterministic torch")
     parser.add_argument('--cuda', default='cuda:0', help='run on CUDA')
     parser.add_argument("--track", type=lambda x: bool(strtobool(x)), default=False, help="wandb tracking")
     
-    # SAC 参数
-    parser.add_argument("--total-timesteps", type=int, default=1000000, help="total timesteps")
+    # ==========================================
+    # SAC 算法参数
+    # ==========================================
+    parser.add_argument("--total-timesteps", type=int, default=2500000, help="total timesteps")
     parser.add_argument("--buffer-size", type=int, default=int(1e6), help="buffer size")
     parser.add_argument("--gamma", type=float, default=0.99, help="discount factor")
     parser.add_argument("--tau", type=float, default=0.005, help="soft update coef")
-    parser.add_argument("--batch-size", type=int, default=512, help="batch size")
-    parser.add_argument("--learning-starts", type=int, default=5000, help="timesteps before learning")
+    parser.add_argument("--batch-size", type=int, default=256, help="batch size")
+    parser.add_argument("--learning-starts", type=int, default=10000, help="timesteps before learning")
     parser.add_argument("--policy-lr", type=float, default=3e-4, help="policy learning rate")
     parser.add_argument("--q-lr", type=float, default=1e-3, help="q network learning rate")
     parser.add_argument("--policy-frequency", type=int, default=2, help="policy update freq")
     parser.add_argument("--target-network-frequency", type=int, default=1, help="target network update freq")
-    parser.add_argument("--alpha", type=float, default=0.5, help="Entropy coef")
+    parser.add_argument("--alpha", type=float, default=0.2, help="Entropy coef")
     parser.add_argument("--autotune", type=lambda x: bool(strtobool(x)), default=True, help="auto alpha")
 
-    # 🔥 评估参数
-    parser.add_argument("--eval-frequency", type=int, default=5000, help="evaluation frequency")
+    # ==========================================
+    # 评估参数
+    # ==========================================
+    parser.add_argument("--eval-frequency", type=int, default=10000, help="evaluation frequency")
     parser.add_argument("--eval-episodes", type=int, default=10, help="number of episodes for evaluation")
+
+    # ==========================================
+    # 环境参数 (完全对齐 main.py，确保物理模型一致)
+    # ==========================================
+    # 注意：sac使用agent端归一化，所以这里normalize_state虽然传入但env内部应忽略或设为False
+    parser.add_argument('--normalize_state', type=lambda x: bool(strtobool(str(x))), default=False, 
+                        help="Should be False for SAC env, handled by Agent")
     
-    # 环境参数 (保留参数接口以便调节)
-    parser.add_argument("--eav-penalty-coef", type=float, default=5.0, help="Coefficient for eavesdropping penalty")
-    parser.add_argument("--comm-penalty-coef", type=float, default=0.5, help="Coefficient for communication penalty")
-    parser.add_argument('--normalize_state', type=lambda x: bool(strtobool(str(x))), default=True, help="Whether to normalize in agent")
-    parser.add_argument('--reward_scale', type=float, default=0.1)
-    
+    # 奖励缩放与动作平滑
+    parser.add_argument('--reward_scale', type=float, default=0.1, help="reward scaling factor")
+    parser.add_argument('--action_smooth_coef', type=float, default=0.8, help="action smoothness penalty coefficient")
+    parser.add_argument('--user_move_range', type=float, default=20.0, help="user movement range per step")
+
+    # 窃听 (Eavesdropper) 相关
+    parser.add_argument('--eav_agg', type=str, default='logsumexp', choices=['max', 'top2', 'logsumexp'])
+    parser.add_argument('--eav_logsumexp_kappa', type=float, default=0.5)
+    parser.add_argument('--eav_threshold', type=float, default=10.0)
+    parser.add_argument('--eav_penalty_coef', type=float, default=3.0)
+    parser.add_argument('--eav_penalty_cap', type=float, default=20.0)
+
+    # 通信 (Communication) 相关
+    parser.add_argument('--comm_penalty', type=str, default='softplus', choices=['hinge', 'softplus', 'huber'])
+    parser.add_argument('--comm_threshold', type=float, default=10.0)
+    parser.add_argument('--comm_penalty_coef', type=float, default=1.5)
+    parser.add_argument('--comm_softplus_kappa', type=float, default=5.0)
+    parser.add_argument('--comm_huber_delta', type=float, default=1.0)
+    parser.add_argument('--comm_penalty_cap_per_user', type=float, default=15.0)
+    parser.add_argument('--comm_penalty_cap_total', type=float, default=30.0)
+    parser.add_argument('--comm_penalty_avg_over_k', type=lambda x: bool(strtobool(str(x))), default=True)
+
+    # 裁剪参数
+    parser.add_argument('--eta_clip_max', type=float, default=15.0)
+    parser.add_argument('--comm_penalty_clip_max', type=float, default=5.0)
+    parser.add_argument('--eav_penalty_clip_max', type=float, default=5.0)
+
     args = parser.parse_args()
     return args
 
 def make_uav_env(args):
-    # 初始化环境，参数根据你的需要传递
+    """
+    初始化环境，传入所有物理参数
+    """
     env = UAVISACEnvironment(
+        eav_agg=args.eav_agg,
+        eav_logsumexp_kappa=args.eav_logsumexp_kappa,
+        eav_threshold=args.eav_threshold,
+        eav_penalty_coef=args.eav_penalty_coef,
+        eav_penalty_cap=args.eav_penalty_cap,
+        comm_penalty_type=args.comm_penalty,
+        comm_threshold=args.comm_threshold,
+        comm_penalty_coef=args.comm_penalty_coef,
+        comm_softplus_kappa=args.comm_softplus_kappa,
+        comm_huber_delta=args.comm_huber_delta,
+        comm_penalty_cap_per_user=args.comm_penalty_cap_per_user,
+        comm_penalty_cap_total=args.comm_penalty_cap_total,
+        comm_penalty_avg_over_k=args.comm_penalty_avg_over_k,
+        action_smooth_coef=args.action_smooth_coef,
+        user_move_range=args.user_move_range,
         reward_scale=args.reward_scale,
-        eav_penalty_coef=args.eav_penalty_coef,   # 传入参数
-        comm_penalty_coef=args.comm_penalty_coef   # 传入参数
+        eta_clip_max=args.eta_clip_max,
+        comm_penalty_clip_max=args.comm_penalty_clip_max,
+        eav_penalty_clip_max=args.eav_penalty_clip_max,
     )
     return env
 
-# 网络定义保持不变
+# ============================================================
+# 网络定义
+# ============================================================
 class SoftQNetwork(nn.Module):
     def __init__(self, env):
         super().__init__()
@@ -132,7 +187,7 @@ class Actor(nn.Module):
         mean = self.fc_mean(x)
         log_std = self.fc_logstd(x)
         log_std = torch.tanh(log_std)
-        log_std = -5 + 0.5 * (2 - (-5)) * (log_std + 1) # LOG_STD_MIN ~ MAX
+        log_std = -5 + 0.5 * (2 - (-5)) * (log_std + 1)
         return mean, log_std
 
     def get_action(self, x):
@@ -152,26 +207,25 @@ if __name__ == "__main__":
     args = parse_args()
     
     current_time_str = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    log_dir = os.path.join("results", "sac", current_time_str)
+    log_dir = os.path.join("record", "sac", f"{args.exp_name}_{current_time_str}")
     writer = SummaryWriter(log_dir)
 
-    # 随机种子
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     torch.backends.cudnn.deterministic = args.torch_deterministic
 
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
+    print(f"Using device: {device}")
 
-    # 环境设置
+    # 环境初始化
+    print("Initializing Environments (Using myenv2 without internal normalization)...")
     env = make_uav_env(args)
     eval_env = make_uav_env(args)
 
-    # 🔥 初始化状态归一化器 (Agent端)
-    if args.normalize_state:
-        obs_rms = RunningMeanStd(shape=env.observation_space.shape)
-    else:
-        obs_rms = None
+    # 🔥 Agent 端状态归一化初始化
+    # 因为环境是Raw的，所以Agent必须维护一个归一化器
+    obs_rms = RunningMeanStd(shape=env.observation_space.shape)
 
     actor = Actor(env).to(device)
     qf1 = SoftQNetwork(env).to(device)
@@ -204,104 +258,117 @@ if __name__ == "__main__":
     rb_ptr = 0
     rb_size = 0
 
-    start_time = time.time()
+    # 统计相关
+    recent_rewards = deque(maxlen=100)
+    ema_reward = None
     
-    # Reset 返回 obs, info
     obs, _ = env.reset(seed=args.seed)
-    
-    # 🔥 更新初始状态的统计量
-    if args.normalize_state:
-        obs_rms.update(obs)
+    # 初始状态更新到归一化器
+    obs_rms.update(obs)
 
     episode_reward = 0
-
+    episode_steps = 0
+    episodes_count = 0
+    
     print("Starting training...")
+
     for global_step in range(args.total_timesteps):
         
         # 1. 动作选择
         if global_step < args.learning_starts:
             action = env.action_space.sample()
         else:
-            # 🔥 归一化当前状态再送入网络
-            if args.normalize_state:
-                norm_obs = obs_rms.normalize(obs)
-            else:
-                norm_obs = obs
-            
+            # 🔥 归一化后输入网络
+            norm_obs = obs_rms.normalize(obs)
             with torch.no_grad():
                 action, _, _ = actor.get_action(torch.Tensor(norm_obs).to(device).unsqueeze(0))
                 action = action.cpu().numpy().flatten()
 
-        # 2. 环境步进
-        # 🔥 修改点：接收 terminated 和 truncated
+        # 2. 环境步进 (获取 Raw State)
         next_obs, reward, terminated, truncated, info = env.step(action)
+        episode_steps += 1
         
-        # 记录统计量
-        if global_step % 1000 == 0:
-            writer.add_scalar("charts/eta_0", info.get('eta_0', 0), global_step)
-            writer.add_scalar("charts/reward_raw", info.get('reward_raw', 0), global_step)
+        # 🔥 对齐日志：每 200 步记录详细的 reward_terms
+        if global_step % 200 == 0:
+            writer.add_scalar('reward_terms/eta_0', float(info.get('eta_0', 0.0)), global_step)
+            writer.add_scalar('reward_terms/comm_penalty', float(info.get('comm_penalty', 0.0)), global_step)
+            writer.add_scalar('reward_terms/eav_penalty', float(info.get('eav_penalty', 0.0)), global_step)
+            writer.add_scalar('reward_terms/energy_penalty', float(info.get('energy_penalty', 0.0)), global_step)
+            writer.add_scalar('reward_terms/boundary_penalty', float(info.get('boundary_penalty', 0.0)), global_step)
+            writer.add_scalar('reward_terms/action_smooth_penalty', float(info.get('action_smooth_penalty', 0.0)), global_step)
+            
+            writer.add_scalar('reward_terms/reward_raw', float(info.get('reward_raw', 0.0)), global_step)
+            writer.add_scalar('reward_terms/reward_clip_1', float(info.get('reward_clip_1', reward)), global_step)
+            # 训练时使用的最终 reward
+            writer.add_scalar('reward_terms/reward_final', float(info.get('reward_final', reward)), global_step)
+            
+            writer.add_scalar('reward_terms/eta_0_clipped', float(info.get('eta_0_clipped', 0.0)), global_step)
+            writer.add_scalar('reward_terms/comm_penalty_clipped', float(info.get('comm_penalty_clipped', 0.0)), global_step)
+            writer.add_scalar('reward_terms/eav_penalty_clipped', float(info.get('eav_penalty_clipped', 0.0)), global_step)
 
-        # 3. Buffer 存储逻辑
-        # 🔥 关键修改：SAC的 done 只看 terminated，不看 truncated (超时)
+        # 3. Buffer 存储 (存 Raw Data)
         real_done = terminated 
-        
-        # 存入原始数据 (RAW data)
         rb_obs[rb_ptr] = obs
         rb_actions[rb_ptr] = action
         rb_rewards[rb_ptr] = reward
         rb_next_obs[rb_ptr] = next_obs
-        rb_dones[rb_ptr] = real_done # 存的是 terminated
+        rb_dones[rb_ptr] = real_done
         rb_ptr = (rb_ptr + 1) % args.buffer_size
         rb_size = min(rb_size + 1, args.buffer_size)
 
         episode_reward += reward
-        obs = next_obs # 更新 obs
-
-        # 🔥 更新统计量 (用新产生的 obs 更新)
-        if args.normalize_state:
-            obs_rms.update(obs)
+        obs = next_obs
+        
+        # 更新归一化统计量 (用新遇到的 Raw State)
+        obs_rms.update(obs)
 
         # 4. 回合结束处理
         if terminated or truncated:
-            writer.add_scalar("charts/episodic_return", episode_reward, global_step)
-            print(f"Step: {global_step}, Return: {episode_reward:.2f}, Terminated: {terminated}, Truncated: {truncated}")
+            episodes_count += 1
             
+            recent_rewards.append(episode_reward)
+            ema_reward = episode_reward if ema_reward is None else (0.95 * ema_reward + 0.05 * episode_reward)
+            
+            # 🔥 对齐日志：使用与 main.py 一致的标签
+            writer.add_scalar('reward/train', episode_reward, global_step)
+            writer.add_scalar('reward/train_ma100', float(np.mean(recent_rewards)), global_step)
+            writer.add_scalar('reward/train_ema', float(ema_reward), global_step)
+            
+            if episodes_count % 10 == 0:
+                print(f"Step: {global_step}, Episode: {episodes_count}, Reward: {episode_reward:.2f}")
+
             obs, _ = env.reset(seed=None)
+            obs_rms.update(obs) # Reset 后也要 update
             episode_reward = 0
-            # Reset 后也要 update 统计量
-            if args.normalize_state:
-                obs_rms.update(obs)
+            episode_steps = 0
 
         # 5. 训练逻辑
         if global_step > args.learning_starts:
-            # 采样
             idxs = np.random.randint(0, rb_size, size=args.batch_size)
-            b_obs = rb_obs[idxs]
-            b_next_obs = rb_next_obs[idxs]
+            
+            # 从 Buffer 取出 Raw Data
+            b_obs_raw = rb_obs[idxs]
+            b_next_obs_raw = rb_next_obs[idxs]
+            
+            # 🔥 关键：在训练前实时归一化 batch
+            # 这解决了异策略 Buffer 数据分布漂移的问题
+            b_obs = torch.tensor(obs_rms.normalize(b_obs_raw), device=device)
+            b_next_obs = torch.tensor(obs_rms.normalize(b_next_obs_raw), device=device)
+            
             b_actions = torch.tensor(rb_actions[idxs], device=device)
             b_rewards = torch.tensor(rb_rewards[idxs], device=device)
             b_dones = torch.tensor(rb_dones[idxs], device=device)
 
-            # 🔥 关键修改：在采样后，使用最新的 obs_rms 进行归一化
-            # 这样网络永远看到的是标准正态分布，且 Buffer 数据不会过期
-            if args.normalize_state:
-                b_obs_norm = torch.tensor(obs_rms.normalize(b_obs), device=device)
-                b_next_obs_norm = torch.tensor(obs_rms.normalize(b_next_obs), device=device)
-            else:
-                b_obs_norm = torch.tensor(b_obs, device=device)
-                b_next_obs_norm = torch.tensor(b_next_obs, device=device)
-
             # 更新 Critic
             with torch.no_grad():
-                next_state_actions, next_state_log_pi, _ = actor.get_action(b_next_obs_norm)
-                qf1_next_target = qf1_target(b_next_obs_norm, next_state_actions)
-                qf2_next_target = qf2_target(b_next_obs_norm, next_state_actions)
+                next_state_actions, next_state_log_pi, _ = actor.get_action(b_next_obs)
+                qf1_next_target = qf1_target(b_next_obs, next_state_actions)
+                qf2_next_target = qf2_target(b_next_obs, next_state_actions)
                 min_qf_next_target = torch.min(qf1_next_target, qf2_next_target) - alpha * next_state_log_pi
-                # TD Target
                 next_q_value = b_rewards.flatten() + (1 - b_dones.flatten()) * args.gamma * (min_qf_next_target.view(-1))
 
-            qf1_a_values = qf1(b_obs_norm, b_actions).view(-1)
-            qf2_a_values = qf2(b_obs_norm, b_actions).view(-1)
+            qf1_a_values = qf1(b_obs, b_actions).view(-1)
+            qf2_a_values = qf2(b_obs, b_actions).view(-1)
             qf1_loss = F.mse_loss(qf1_a_values, next_q_value)
             qf2_loss = F.mse_loss(qf2_a_values, next_q_value)
             qf_loss = qf1_loss + qf2_loss
@@ -312,9 +379,9 @@ if __name__ == "__main__":
 
             # 更新 Actor
             if global_step % args.policy_frequency == 0:
-                pi, log_pi, _ = actor.get_action(b_obs_norm)
-                qf1_pi = qf1(b_obs_norm, pi)
-                qf2_pi = qf2(b_obs_norm, pi)
+                pi, log_pi, _ = actor.get_action(b_obs)
+                qf1_pi = qf1(b_obs, pi)
+                qf2_pi = qf2(b_obs, pi)
                 min_qf_pi = torch.min(qf1_pi, qf2_pi)
                 actor_loss = ((alpha * log_pi) - min_qf_pi).mean()
 
@@ -324,7 +391,7 @@ if __name__ == "__main__":
 
                 if args.autotune:
                     with torch.no_grad():
-                        _, log_pi, _ = actor.get_action(b_obs_norm)
+                        _, log_pi, _ = actor.get_action(b_obs)
                     alpha_loss = (-log_alpha.exp() * (log_pi + target_entropy)).mean()
                     a_optimizer.zero_grad()
                     alpha_loss.backward()
@@ -337,58 +404,50 @@ if __name__ == "__main__":
                 for param, target_param in zip(qf2.parameters(), qf2_target.parameters()):
                     target_param.data.copy_(args.tau * param.data + (1 - args.tau) * target_param.data)
 
-            # 记录 Loss
-            if global_step % 100 == 0:
-                writer.add_scalar("losses/qf1_loss", qf1_loss.item(), global_step)
-                writer.add_scalar("losses/actor_loss", actor_loss.item(), global_step)
-
         # ============================================================
-        # 🔥 新增：定期评估逻辑 (Evaluation Loop)
+        # 🔥 评估逻辑 (完全对齐 main.py)
         # ============================================================
         if global_step > 0 and global_step % args.eval_frequency == 0:
             print(f"Evaluating at step {global_step}...")
-            actor.eval() # 切换网络到评估模式 (影响 dropout/batchnorm 等，虽然 SAC 通常没这些，但好习惯)
             
-            avg_return = 0.0
-            for _ in range(args.eval_episodes):
+            # SAC评估时不需要同步Env内部的归一化器(因为Env是Raw的)
+            # 而是直接使用 obs_rms 对 eval_env 的输出进行归一化
+            
+            actor.eval()
+            returns = np.zeros((args.eval_episodes,), dtype=np.float32)
+            
+            for i in range(args.eval_episodes):
                 eval_obs, _ = eval_env.reset()
                 eval_done = False
                 eval_episode_ret = 0.0
                 
                 while not eval_done:
-                    # 1. 归一化：使用训练集的统计量，但【不更新】统计量
-                    if args.normalize_state:
-                        # 注意：这里只调用 normalize，千万不要调用 update
-                        eval_obs_norm = obs_rms.normalize(eval_obs)
-                    else:
-                        eval_obs_norm = eval_obs
-
-                    # 2. 动作选择：使用确定性策略 (Deterministic Action)
+                    # 🔥 使用训练得到的统计量归一化评估状态
+                    norm_eval_obs = obs_rms.normalize(eval_obs)
+                    
                     with torch.no_grad():
-                        # get_action 返回 (sample, log_prob, mean)
-                        # 索引 [2] 是 mean，即确定性动作
+                        # 获取确定性动作 (mean)
                         _, _, eval_action_mean = actor.get_action(
-                            torch.Tensor(eval_obs_norm).to(device).unsqueeze(0)
+                            torch.Tensor(norm_eval_obs).to(device).unsqueeze(0)
                         )
                         eval_action = eval_action_mean.cpu().numpy().flatten()
                     
-                    # 3. 环境步进
                     eval_next_obs, eval_r, eval_term, eval_trunc, _ = eval_env.step(eval_action)
-                    
                     eval_episode_ret += eval_r
                     eval_done = eval_term or eval_trunc
                     eval_obs = eval_next_obs
                 
-                avg_return += eval_episode_ret
+                returns[i] = eval_episode_ret
             
-            avg_return /= args.eval_episodes
+            mean_return = np.mean(returns)
+            std_return = np.std(returns)
             
-            # 写入 TensorBoard
-            writer.add_scalar("eval/return", avg_return, global_step)
-            print(f"Eval Return at step {global_step}: {avg_return:.2f}")
+            # 🔥 记录测试时的 reward (与 main.py 一致)
+            writer.add_scalar('reward/eval_mean', mean_return, global_step)
+            print(f"Eval result: reward: {mean_return:.1f}, std: {std_return:.1f}")
             
-            actor.train() # 切回训练模式
+            actor.train()
+
     env.close()
-    eval_env.close() # 🔥 关闭评估环境
-    writer.close()
+    eval_env.close()
     writer.close()
