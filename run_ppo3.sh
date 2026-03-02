@@ -14,3 +14,27 @@
 # 强制训练截断：在训练循环中，送入环境之前，必须把动作截断到 [-1, 1]。让 Agent 学会在合法动作范围内生存。
 # 降低初始探索噪声：目前的 LogStd 默认为 0 (即标准差为 1.0)。对于范围只有 [-1, 1] 的动作，这个噪声太大了，导致 Agent 前期完全是在乱撞。我们将初始 LogStd 设为 -0.5 或 -1.0。
 # 增加 Actor 确定性：在 Actor 的最后一层添加 nn.Tanh()，虽然 PPO 标准实现不强制用 Tanh，但在这种强约束环境下，Tanh 能帮助均值稳定在合法区间内。
+
+# 命令同2
+
+#PPO_Baseline/Env__ppo__42__26_03_02_11_56_29
+python ppo.py \
+  --env_name Env \
+  --seed 42 \
+  --total_timesteps 2500000 \
+  --normalize_state True \
+  --action_smooth_coef 0.1 \
+  --user_move_range 20.0 \
+  --reward_scale 0.1 \
+  --eav_agg top2 \
+  --eav_threshold 10.0 \
+  --eav_penalty_coef 0.5 \
+  --eav_penalty_cap 20.0 \
+  --comm_penalty softplus \
+  --comm_threshold 10.0 \
+  --comm_penalty_coef 1.5 \
+  --comm_softplus_kappa 5.0 \
+  --comm_penalty_cap_per_user 15.0 \
+  --comm_penalty_cap_total 30.0 \
+  --comm_penalty_avg_over_k True \
+  --cuda cuda:1
