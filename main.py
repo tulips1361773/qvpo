@@ -54,11 +54,11 @@ def readParser():
     parser.add_argument('--update_actor_target_every', type=int, default=1, metavar='N',
                         help='update actor target per iteration (default: 1)')
 
-    parser.add_argument("--policy_type", type=str, default="FlowMatching", metavar='S',
+    parser.add_argument("--policy_type", type=str, default="Diffusion", metavar='S',
                         help="Diffusion, FlowMatching, VAE or MLP")
     parser.add_argument("--beta_schedule", type=str, default="cosine", metavar='S',
                         help="linear, cosine or vp")
-    parser.add_argument('--n_timesteps', type=int, default=10, metavar='N',
+    parser.add_argument('--n_timesteps', type=int, default=20, metavar='N',
                         help='diffusion timesteps (default: 20)')
     
     parser.add_argument('--diffusion_lr', type=float, default=0.0001, metavar='G',
