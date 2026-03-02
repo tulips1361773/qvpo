@@ -20,23 +20,21 @@ from myenv import UAVISACEnvironment
 def parse_args():
     parser = argparse.ArgumentParser(description='PPO Agent for UAV-ISAC')
     
-    # --- PPO 核心参数 (已修正默认值) ---
+    # --- PPO 核心参数 ---
     parser.add_argument('--exp_name', type=str, default=os.path.basename(__file__).rstrip(".py"),
                         help='the name of this experiment')
     parser.add_argument('--learning_rate', type=float, default=3e-4,
                         help='the learning rate of the optimizer')
     parser.add_argument('--seed', type=int, default=1,
                         help='seed of the experiment')
-    # 🔥 关键修正：总步数由 total_timesteps 控制
     parser.add_argument('--total_timesteps', type=int, default=2500000,
                         help='total timesteps of the experiments')
     parser.add_argument('--torch_deterministic', type=lambda x: bool(strtobool(x)), default=True,
                         help='if toggled, `torch.backends.cudnn.deterministic=False`')
-    # 修正 cuda 参数为字符串，兼容 main.py
     parser.add_argument('--cuda', type=str, default='cuda:0',
                         help='device to use: cuda:0, cuda:1 or cpu')
     
-    # 🔥 关键修正：num_steps 是每次更新采集的步数，必须小！通常 2048
+    # 训练循环参数
     parser.add_argument('--num_steps', type=int, default=2048,
                         help='the number of steps to run in each environment per policy rollout')
     parser.add_argument('--num_minibatches', type=int, default=32,
@@ -53,7 +51,7 @@ def parse_args():
                         help="the surrogate clipping coefficient")
     parser.add_argument('--clip_vloss', type=lambda x: bool(strtobool(x)), default=True,
                         help="Toggles whether or not to use a clipped loss for the value function")
-    parser.add_argument('--ent_coef', type=float, default=0.01, # 稍微增加熵系数防止过早收敛
+    parser.add_argument('--ent_coef', type=float, default=0.01,
                         help="coefficient of the entropy")
     parser.add_argument('--vf_coef', type=float, default=0.5,
                         help="coefficient of the value function")
@@ -62,7 +60,7 @@ def parse_args():
     parser.add_argument('--target_kl', type=float, default=None,
                         help='the target KL divergence threshold')
     
-    # --- 环境参数 (保持一致) ---
+    # --- 环境参数 ---
     parser.add_argument('--env_name', default="Env", help='Custom UAV-ISAC environment')
     parser.add_argument('--normalize_state', type=lambda x: bool(strtobool(x)), default=True,
                         help="enable state normalization (default: True)")
@@ -106,7 +104,7 @@ class Agent(nn.Module):
         obs_shape = np.prod(env.observation_space.shape)
         action_shape = np.prod(env.action_space.shape)
         
-        # 🔥 修改：增加网络宽度至 256 (对齐 SAC)
+        # Critic: 256x256
         self.critic = nn.Sequential(
             layer_init(nn.Linear(obs_shape, 256)),
             nn.Tanh(),
@@ -115,15 +113,19 @@ class Agent(nn.Module):
             layer_init(nn.Linear(256, 1), std=1.0),
         )
         
+        # Actor Mean: 256x256
         self.actor_mean = nn.Sequential(
             layer_init(nn.Linear(obs_shape, 256)),
             nn.Tanh(),
             layer_init(nn.Linear(256, 256)),
             nn.Tanh(),
+            # 💡 修改1: 使用 Tanh 确保均值在 [-1, 1] 之间，帮助收敛
             layer_init(nn.Linear(256, action_shape), std=0.01),
+            nn.Tanh() 
         )
         
-        self.actor_logstd = nn.Parameter(torch.zeros(1, action_shape))
+        # 💡 修改2: 降低初始噪声 (LogStd 从 0 改为 -0.5)，避免前期过度乱跑
+        self.actor_logstd = nn.Parameter(torch.ones(1, action_shape) * -0.5)
 
     def get_value(self, x):
         return self.critic(x)
@@ -140,11 +142,11 @@ class Agent(nn.Module):
         return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.critic(x)
 
     def get_eval_action(self, x):
-        """Evaluation模式下使用均值（确定性策略）"""
         return self.actor_mean(x)
 
 def evaluate(env, agent, device, source_env=None):
     """PPO 评估函数"""
+    # 1. 强同步状态归一化统计量
     if source_env is not None and hasattr(source_env, 'state_normalizer') and hasattr(env, 'state_normalizer'):
         env.state_normalizer.mean = source_env.state_normalizer.mean.copy()
         env.state_normalizer.var = source_env.state_normalizer.var.copy()
@@ -168,7 +170,7 @@ def evaluate(env, agent, device, source_env=None):
                 action = agent.get_eval_action(state_tensor)
                 action = action.cpu().numpy()[0]
             
-            # Action clip
+            # 评估时也进行截断 (保持一致)
             action = np.clip(action, -1.0, 1.0)
             
             next_state, reward, done, truncated, _ = env.step(action)
@@ -186,18 +188,17 @@ def evaluate(env, agent, device, source_env=None):
 def main():
     args = parse_args()
     
-    # 构造运行名称，包含主要参数
-    run_name = f"{args.env_name}__ppo_s{args.seed}_{datetime.datetime.now().strftime('%m%d_%H%M')}"
-    log_dir = os.path.join("record", "PPO_Fixed", run_name)
+    run_name = f"{args.env_name}__ppo_fixed_clip__{args.seed}_{datetime.datetime.now().strftime('%m%d_%H%M')}"
+    log_dir = os.path.join("record", "PPO_Corrected", run_name)
     writer = SummaryWriter(log_dir)
     
     # 打印参数
     print(f"{'='*30}")
-    print(f"Running PPO with:")
-    print(f"  Total Timesteps: {args.total_timesteps}")
-    print(f"  Steps per Rollout: {args.num_steps} (Updates every {args.num_steps} steps)")
-    print(f"  Hidden Size: 256")
+    print(f"PPO Training Config (Fixed Clipping):")
     print(f"  Device: {args.cuda}")
+    print(f"  Total Timesteps: {args.total_timesteps}")
+    print(f"  Steps/Rollout: {args.num_steps}")
+    print(f"  Action Clipping: Enabled in Train Loop [-1, 1]")
     print(f"{'='*30}")
 
     random.seed(args.seed)
@@ -205,12 +206,10 @@ def main():
     torch.manual_seed(args.seed)
     torch.backends.cudnn.deterministic = args.torch_deterministic
 
-    # 设备选择修复
     if torch.cuda.is_available() and "cuda" in args.cuda:
         device = torch.device(args.cuda)
     else:
         device = torch.device("cpu")
-    print(f"Using device: {device}")
 
     # 环境参数
     env_kwargs = {
@@ -242,7 +241,7 @@ def main():
     agent = Agent(env).to(device)
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
-    # 存储Buffer
+    # Storage
     obs = torch.zeros((args.num_steps, int(np.prod(env.observation_space.shape)))).to(device)
     actions = torch.zeros((args.num_steps, int(np.prod(env.action_space.shape)))).to(device)
     logprobs = torch.zeros((args.num_steps)).to(device)
@@ -260,13 +259,12 @@ def main():
     episode_rewards = deque(maxlen=100)
     current_episode_reward = 0
     
-    # Eval 频率控制
+    # Eval logic
     last_eval_step = 0
-    eval_interval = 10000 # 每 10000 步评估一次
+    eval_interval = 10000 
     best_eval_return = -float('inf')
 
     info_buffer = {k: [] for k in ['eta_0', 'comm_penalty', 'eav_penalty', 'reward_raw', 'reward_final']}
-
     num_updates = args.total_timesteps // args.num_steps
 
     for update in range(1, num_updates + 1):
@@ -288,7 +286,13 @@ def main():
             actions[step] = action
             logprobs[step] = logprob
 
-            next_obs_np, reward, terminated, truncated, info = env.step(action.cpu().numpy()[0])
+            # 💡 修改3: 关键！训练时必须截断动作！
+            # 这样 Agent 才知道虽然神经网络输出了 2.0，但环境实际只执行了 1.0
+            # 它必须学会输出 1.0 以内的值来获得精确控制
+            action_np = action.cpu().numpy()[0]
+            action_clipped = np.clip(action_np, -1.0, 1.0)
+
+            next_obs_np, reward, terminated, truncated, info = env.step(action_clipped)
             done = terminated or truncated
             
             rewards[step] = torch.tensor(reward).to(device).view(-1)
@@ -297,27 +301,24 @@ def main():
 
             current_episode_reward += reward
 
-            # Buffer info
             for k in info_buffer.keys():
-                if k in info:
-                    info_buffer[k].append(info[k])
+                if k in info: info_buffer[k].append(info[k])
 
             if done:
                 episode_rewards.append(current_episode_reward)
                 writer.add_scalar("reward/train", current_episode_reward, global_step)
                 writer.add_scalar("reward/train_ma100", np.mean(episode_rewards), global_step)
-                
                 current_episode_reward = 0
                 next_obs, _ = env.reset(seed=args.seed + global_step)
                 next_obs = torch.Tensor(next_obs).to(device)
                 next_done = torch.zeros(1).to(device)
 
-        # 记录分项
+        # Log metrics
         for k, v in info_buffer.items():
             if v: writer.add_scalar(f"reward_terms/{k}", np.mean(v), global_step)
         for k in info_buffer.keys(): info_buffer[k] = []
 
-        # --- 2. GAE ---
+        # --- 2. GAE Calculation ---
         with torch.no_grad():
             next_value = agent.get_value(next_obs.unsqueeze(0)).reshape(1, -1)
             advantages = torch.zeros_like(rewards).to(device)
