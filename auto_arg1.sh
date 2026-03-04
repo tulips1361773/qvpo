@@ -1,0 +1,29 @@
+python aoto_arg.py \
+  --env_name Env \
+  --seed 42 \
+  --num_steps 250000 \
+  --batch_size 512 \
+  --gamma 0.99 \
+  --tau 0.005 \
+  --diffusion_lr 0.0001 \
+  --critic_lr 0.0004 \
+  --n_timesteps 20 \
+  --beta_schedule cosine \
+  --entropy_alpha 0.05 \
+  --train_sample 32 \
+  --behavior_sample 8 \
+  --target_sample 2 \
+  --eval_sample 16 \
+  --ac_grad_norm 1.0 \
+  --q_transform qadv \
+  --chosen 1 \
+  --q_neg 0.001 \
+  --cut 0.8 \
+  --policy_freq 2 \
+  --weighted \
+  --aug \
+  --normalize_state True \
+  --action_smooth_coef 0.1 \
+  --user_move_range 20.0 \
+  --start_steps 10000 \
+  --cuda cuda:0

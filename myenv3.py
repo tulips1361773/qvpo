@@ -1,0 +1,570 @@
+import numpy as np
+import gymnasium as gym
+from gymnasium import spaces
+import math
+
+from gymnasium.envs.registration import register
+register(
+    id='Env',
+    entry_point='doubleobservation:UAVISACEnvironment',
+    max_episode_steps=50
+)
+
+def calc_energy(
+    v_u_t: float,
+    delta_t: float
+) -> float:
+    """根据论文公式(13) 计算单个时隙能耗 (J)。"""
+    d_0   = 0.6
+    rho_a = 1.225
+    z     = 0.05
+    G     = 0.503
+    P_s   = 79.85
+    U_r   = 120.0
+    P_m   = 88.63
+    V_h   = 4.03
+
+    term1 = 0.5 * d_0 * rho_a * z * G * v_u_t**3
+    term2 = P_s * (1 + 3 * (v_u_t / U_r)**2)
+    inner = math.sqrt(1 + 0.25 * (v_u_t / V_h)**4) - 0.5 * (v_u_t / V_h)**2
+    term3 = P_m * math.sqrt(inner)
+
+    power = term1 + term2 + term3
+    return power * delta_t
+
+
+# ============================================================
+# 优化版：状态归一化器类 (Standard Welford Implementation)
+# ============================================================
+class StateNormalizer:
+    """
+    基于 Welford 算法的标准在线归一化器。
+    相比原版：数值更稳定，移除复杂的 batch 合并逻辑，修正初始化问题。
+    """
+    def __init__(self, state_dim, epsilon=1e-4, clip_range=10.0):
+        self.state_dim = state_dim
+        self.epsilon = epsilon
+        self.clip_range = clip_range
+        
+        # 统计量
+        self.mean = np.zeros(state_dim, dtype=np.float64)
+        # M2 用于记录 (x - mean)^2 的累积和，用于计算方差
+        self.M2 = np.zeros(state_dim, dtype=np.float64) 
+        self.var = np.ones(state_dim, dtype=np.float64) # 默认为1，避免初期除0
+        self.count = 0.0
+        
+        # 训练模式开关
+        self.training = True
+        
+    def update(self, state):
+        """
+        使用 Welford 算法更新统计量
+        针对单个样本或 Batch 均可，这里假设输入为单个 state (shape: [dim])
+        """
+        x = np.asarray(state, dtype=np.float64)
+        
+        self.count += 1
+        
+        # Welford 核心公式
+        delta = x - self.mean
+        self.mean += delta / self.count
+        delta2 = x - self.mean
+        self.M2 += delta * delta2
+        
+        # 计算方差 (样本方差除以 n-1，总体方差除以 n，这里用 n 即可，RL中差异不大)
+        if self.count > 1:
+            self.var = self.M2 / self.count
+        
+    def normalize(self, state, update_stats=None):
+        """
+        归一化状态
+        """
+        # 自动决定是否更新
+        if update_stats is None:
+            update_stats = self.training
+        
+        # 如果是训练模式，先更新统计量
+        if update_stats:
+            self.update(state)
+        
+        # 执行归一化
+        # 加上 epsilon 防止除零 (var 可能极小)
+        std = np.sqrt(self.var + self.epsilon)
+        normalized = (state - self.mean) / std
+        
+        # Clip 防止极端值破坏梯度
+        normalized = np.clip(normalized, -self.clip_range, self.clip_range)
+        
+        return normalized.astype(np.float32)
+    
+    def set_training(self, mode):
+        self.training = mode
+
+
+
+# ============================================================
+# 主环境类（已集成归一化功能）
+# ============================================================
+class UAVISACEnvironment(gym.Env):
+    def __init__(self, N=50, K=3, H=100, H1=50, l_max=100, sigma2=1e-14, delta_t: float = 4.0,
+                 E_tot: float = 25000.0, energy_penalty: float = 5.0,  # 降低能量阈值使其生效
+                 normalize_state=True, normalize_reward=True,
+                 
+                 eav_agg: str = 'logsumexp', eav_logsumexp_kappa: float = 0.5,  # 建议2: 使用logsumexp平滑聚合，降低kappa
+                 eav_threshold: float = 10.0, eav_penalty_coef: float = 2.0, eav_penalty_clip_max: float = 10.0,  # 降低惩罚系数
+                 
+                 comm_penalty_type: str = 'softplus', 
+                 comm_softplus_kappa: float = 1.0, comm_huber_delta: float = 1.0,  # 降低kappa
+                 comm_penalty_avg_over_k: bool = True,
+
+                 # 通信参数
+                 comm_threshold=10.0,
+                 comm_penalty_coef=0.8,
+                 comm_penalty_clip_per_user=10.0, # 新增
+                 comm_penalty_clip_total=15.0,    # 新增 (即原来的 clip_max)
+
+                 action_smooth_coef: float = 0.8, user_move_range: float = 20.0,  # 增大动作平滑惩罚权重 0.3→0.8
+                 reward_scale: float = 0.1,  # 奖励缩放因子         
+                 ): 
+
+                 
+        super(UAVISACEnvironment, self).__init__()
+
+        # 时间设置
+        self.N = N
+        self.K = K
+        self.H = H
+        self.H1 = H1
+        self.sigma2 = sigma2
+        self.l_max = l_max
+
+        self.delta_t = delta_t
+        self.E_tot = E_tot
+        self.energy_penalty = energy_penalty
+
+        self.eav_agg = eav_agg
+        self.eav_logsumexp_kappa = eav_logsumexp_kappa
+        self.eav_threshold = eav_threshold
+        self.eav_penalty_coef = eav_penalty_coef
+        self.eav_penalty_clip_max = eav_penalty_clip_max
+
+        self.comm_penalty_type = comm_penalty_type
+        self.comm_threshold = comm_threshold
+        self.comm_penalty_coef = comm_penalty_coef
+        self.comm_softplus_kappa = comm_softplus_kappa
+        self.comm_huber_delta = comm_huber_delta
+        self.comm_penalty_clip_per_user = comm_penalty_clip_per_user
+        self.comm_penalty_clip_total = comm_penalty_clip_total
+        self.comm_penalty_avg_over_k = comm_penalty_avg_over_k
+        
+        # 新增参数
+        self.action_smooth_coef = action_smooth_coef
+        self.user_move_range = user_move_range
+        self.reward_scale = reward_scale
+
+        # 无人机飞行范围约束
+        self.X_min = -400.0
+        self.X_max = 400.0
+        self.Y_min = -400.0
+        self.Y_max = 400.0
+
+        # 最大发射功率
+        self.P_max = 0.1
+
+        # 动作空间
+        self.action_space = spaces.Box(low=-1, high=1, shape=(3,), dtype=np.float32)
+
+        # 观察空间
+        obs_dim = (2 + 2 * self.K + 3) * 2
+        self.observation_space = spaces.Box(
+            low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32
+        )
+        
+
+        # self.t1 = 0
+        # self.rresult = 0
+        # self.episode_rewards = []
+
+        self.total_energy = 0.0
+        self.current_episode_reward = 0
+        
+
+        # 初始化观察缓存
+        self.prev_obs = None
+
+        # 🔥 归一化开关与归一化器实例
+        self.normalize_state = normalize_state
+        self.normalize_reward = normalize_reward
+        
+        if self.normalize_state:
+            self.state_normalizer = StateNormalizer(state_dim=obs_dim)
+
+        # 初始化环境
+        self.reset()
+
+    def reset(self, seed=None, options=None):
+        super().reset(seed=seed)
+
+        self.current_slot = 0
+        self.current_episode_reward = 0
+        self.total_energy = 0.0
+
+        x1 = self.np_random.uniform(-400, 400)
+        y1 = self.np_random.uniform(-400, 400)
+        self.uav_position = np.array([x1, y1, self.H])
+
+        # 初始化通信用户位置
+        self.user_positions = []
+        for _ in range(self.K):
+            while True:
+                user_x = self.np_random.uniform(-400, 400)
+                user_y = self.np_random.uniform(-400, 400)
+                if (user_x ** 2 + user_y ** 2) > 10000:
+                    break
+            self.user_positions.append([user_x, user_y, 0])
+
+        self.user_positions = np.array(self.user_positions)
+
+        # 初始化目标位置
+        self.target_position = np.array([100.0, 100.0, self.H1])
+
+        # 初始化合法雷达接收器位置
+        self.radar_receiver_position = np.array([0.0, 0.0, 0.0])
+
+        # 初始化上一步动作为零
+        self.prev_action = np.array([0.0, 0.0, 0.0])
+
+        # 获取当前观察值
+        current_obs = self._get_obs()
+
+        # 初始化前一个观察值为全零
+        self.prev_obs = np.zeros_like(current_obs)
+
+        # 返回组合后的观察值（已归一化）
+        combined_obs = self._get_combined_obs()
+        
+        # 🔥 状态归一化
+        if self.normalize_state:
+            combined_obs = self.state_normalizer.normalize(combined_obs)
+        
+        return combined_obs, {}
+
+    def _get_obs(self):
+        obs = np.concatenate([
+            self.uav_position[:2],
+            self.user_positions[:, :2].flatten(),
+            self.prev_action
+        ])
+        return obs
+
+    def _get_combined_obs(self):
+        return np.concatenate([self._get_obs(), self.prev_obs])
+
+    def step(self, action):
+        # 将动作从 [-1, 1] 映射到实际值
+        angle = action[0] * np.pi
+        distance = action[1] * self.l_max
+        power_allocation = (action[2] + 1) / 2 * self.P_max
+
+        # 更新无人机位置
+        delta_x = distance * np.cos(angle)
+        delta_y = distance * np.sin(angle)
+        new_uav_position = self.uav_position.copy()
+        new_uav_position[0] += delta_x
+        new_uav_position[1] += delta_y
+
+        # 1. 边界处理逻辑优化
+        if new_uav_position[0] < self.X_min or new_uav_position[0] > self.X_max or \
+           new_uav_position[1] < self.Y_min or new_uav_position[1] > self.Y_max:
+            raw_reward = -50.0 
+            
+            # 构造 info
+            info = {
+                'eta_0': 0.0, 'eta_0_clipped': 0.0,
+                'comm_penalty': 0.0, 'comm_penalty_clipped': 0.0,
+                'eav_penalty': 0.0, 'eav_penalty_clipped': 0.0,
+                'energy_penalty': 0.0,
+                'boundary_penalty': 50.0, # 记录绝对值用于日志
+                'action_smooth_penalty': 0.0,
+                'reward_raw': -50.0,
+            }
+            
+            # 【可选】如果希望越界直接结束回合，取消注释下面这行：
+            # self.current_slot = 49 # 强制下一次 check done 为 True
+            
+        else:
+            # 2. 正常奖励计算
+            # calculate_reward 内部已经包含了 eta, comm, eav 的计算和分项 Clip
+            # 注意：calculate_reward 应该返回 raw_reward (未缩放的值)
+            raw_reward, info = self._calculate_reward(new_uav_position, power_allocation)
+            self.uav_position = new_uav_position
+
+        # 4. 能耗惩罚 (保持不变)
+        horizontal_speed = abs(distance) / 4.0
+        energy_t = calc_energy(horizontal_speed, self.delta_t)
+        self.total_energy += energy_t
+        if self.total_energy > self.E_tot:
+            raw_reward -= self.energy_penalty
+            info['energy_penalty'] = float(self.energy_penalty)
+        else:
+            info['energy_penalty'] = 0.0
+        
+        # 5. 动作平滑惩罚 (保持不变)
+        action_diff = action - self.prev_action
+        action_smooth_penalty = self.action_smooth_coef * np.sum(action_diff ** 2)
+        raw_reward -= action_smooth_penalty
+        info['action_smooth_penalty'] = float(action_smooth_penalty)
+
+        # 记录未经缩放的最终奖励，便于在 TensorBoard 中观察真实物理意义的得分
+        info['reward_final_unscaled'] = float(raw_reward)
+
+        # 6. 最终缩放 (Scaling)
+        reward = raw_reward * self.reward_scale
+        info['reward_final'] = float(reward) # 这是给 Agent 看的奖励
+
+        # 计算奖励
+        self.current_episode_reward += reward
+
+        # 记录当前动作
+        self.prev_action = action
+
+        # 更新通信用户位置
+        self._update_user_positions()
+
+        # 增加时间步
+        self.current_slot += 1
+
+        done = False
+        if self.current_slot == 50:
+            done = True
+            # if self.t1 < 500:
+            #     self.rresult += self.current_episode_reward / 50
+            #     self.t1 += 1
+            # else:
+            #     average_rresult = self.rresult / 500
+            #     self.episode_rewards.append(average_rresult)
+            #     self.rresult = 0
+            #     self.t1 = 0
+        
+        # 获取当前观察值
+        current_obs = self._get_obs()
+
+        # 组合当前观察和前一个观察
+        combined_obs = self._get_combined_obs()
+
+        # 🔥 状态归一化
+        if self.normalize_state:
+            combined_obs = self.state_normalizer.normalize(combined_obs)
+
+        # 更新前一个观察值
+        self.prev_obs = current_obs.copy()
+
+        return combined_obs, reward, done, False, info
+
+    def _calculate_reward(self, uav_position, power_allocation):
+        # ==========================================
+        # 部分一：感知增益 (Sensing Reward)
+        # ==========================================
+        # 1. 物理计算：计算探测目标处的信噪比
+        eta_0 = self._calculate_sensing_snr_legal(uav_position, power_allocation)
+        
+        # 2. 裁剪 (Clipping)：硬截断，防止奖励爆炸
+        R_sense = min(eta_0, self.eav_penalty_clip_max)
+        
+        # 3. 累加
+        reward = R_sense
+
+        # ==========================================
+        # 部分三（流程顺序）：通信惩罚 (Communication Penalty)
+        # ==========================================
+        # 目标：平滑 -> 单用户裁剪 -> 聚合(Avg) -> 总裁剪 -> 加权
+        
+        comm_penalties_per_user = []
+        # 1. 物理计算：遍历所有合法用户 (也可以向量化，这里保持逻辑清晰)
+        if self.K > 0:
+            for k in range(self.K):
+                distance = np.linalg.norm(uav_position - self.user_positions[k])
+                snr = self._calculate_communication_snr(distance, power_allocation)
+                
+                # 2. 计算差值：与阈值的差距 (Gap > 0 表示不满足阈值)
+                snr_gap = self.comm_threshold - snr
+                
+                # 3. 平滑 (Smoothing)：使用 Softplus 替代 ReLU/Hinge
+                # LogAddExp(0, x) 等价于 log(1 + exp(x))
+                kappa_comm = self.comm_softplus_kappa
+                per_user_penalty_smooth = np.logaddexp(0.0, kappa_comm * snr_gap) / kappa_comm
+                
+                # 4. 第一次裁剪 (Per-User Clipping)：限制单个用户的最大惩罚
+                per_user_penalty_clipped = min(per_user_penalty_smooth, self.comm_penalty_clip_per_user)
+                comm_penalties_per_user.append(per_user_penalty_clipped)
+            
+            # 5. 聚合 (Aggregation)：取平均值
+            avg_comm_penalty = np.mean(comm_penalties_per_user)
+            
+            # 6. 第二次裁剪 (Total Clipping)：限制总通信惩罚上限
+            P_total = min(avg_comm_penalty, self.comm_penalty_clip_total)
+            
+            # 7. 加权
+            R_comm = P_total * self.comm_penalty_coef
+        else:
+            R_comm = 0.0
+            P_total = 0.0
+
+        # 8. 累加 (减去惩罚)
+        reward -= R_comm
+
+        # ==========================================
+        # 部分二（流程顺序）：窃听惩罚 (Eavesdropping Penalty)
+        # ==========================================
+        # 目标：聚合(Top2) -> 平滑 -> 唯一裁剪 -> 加权
+        
+        eavesdropper_snr_list = self._calculate_sensing_snr_eavesdropper(uav_position, power_allocation)
+        sensing_snr_eavesdropper = 0.0
+        R_eav = 0.0
+        
+        if len(eavesdropper_snr_list) > 0:
+            # 1. 聚合 (Aggregation)：Top 2 策略
+            eav_snrs = np.array(eavesdropper_snr_list, dtype=np.float32)
+            if len(eav_snrs) >= 2:
+                top2 = np.partition(eav_snrs, -2)[-2:]
+                sensing_snr_eavesdropper = float(np.mean(top2))
+            else:
+                sensing_snr_eavesdropper = float(eav_snrs[0])
+            
+            # 2. 计算差值：(Gap > 0 表示窃听SNR过高，违反约束)
+            snr_gap_eav = sensing_snr_eavesdropper - self.eav_threshold
+            
+            # 3. 平滑 (Smoothing)：使用 Softplus
+            # 注意：此处假设存在 eav_softplus_kappa 参数，若未定义可复用 comm 或设默认值
+            kappa_eav = getattr(self, 'eav_softplus_kappa', self.comm_softplus_kappa) 
+            eav_penalty_smooth = np.logaddexp(0.0, kappa_eav * snr_gap_eav) / kappa_eav
+            
+            # 4. 唯一裁剪 (Single Clipping)
+            P_clipped_eav = min(eav_penalty_smooth, self.eav_penalty_clip_max)
+            
+            # 5. 加权
+            R_eav = P_clipped_eav * self.eav_penalty_coef
+            
+            # 6. 累加
+            reward -= R_eav
+
+        # ==========================================
+        # 返回结果与调试信息
+        # ==========================================
+        info = {
+            'eta_0': float(eta_0),
+            'eta_0_clipped': float(R_sense),  
+            'comm_penalty': float(avg_comm_penalty),
+            'comm_penalty_clipped': float(R_comm),  
+            'snr_gap2':float(snr_gap_eav),
+            'eav_penalty': float(eav_penalty_smooth),
+            'eav_penalty_clipped': float(P_clipped_eav) if eav_penalty_smooth > 0 else 0.0,  # 建议3: 裁剪后的窃听惩罚
+            'energy_penalty': 0.0,
+            'boundary_penalty': 0.0,
+            'reward_raw': float(reward),
+        }
+
+        return reward, info
+
+    def _calculate_communication_snr(self, distance, power_allocation):
+        # 通信模型中的信道增益计算
+        c1 = 12.081
+        c2 = 0.11395
+        mu_los = 1.44544
+        mu_nlos = 199.526
+        fc = 2.4e9
+        c = 3e8
+        alpha = 2.0
+        K_0 = (4 * np.pi * fc) / c
+
+        d_3d = np.sqrt(self.H**2 + distance**2)
+        theta = np.arcsin(self.H / d_3d) * 180 / np.pi
+
+        p_los = 1 / (1 + c1 * np.exp(-c2 * (theta - c1)))
+        p_nlos = 1 - p_los
+
+        los = mu_los * (K_0 * d_3d) ** alpha
+        nlos = mu_nlos * (K_0 * d_3d) ** alpha
+        los = max(los, 1e-5)
+        nlos = max(nlos, 1e-5)
+        los = 10 * np.log10(los)
+        nlos = 10 * np.log10(nlos)
+
+        L = p_los * los + p_nlos * nlos
+        L = 10 ** (L / 10)
+        omega = 1 / L
+
+        snr = (omega * power_allocation) / self.sigma2
+        snr = max(snr, 1e-5)
+        snr_db = 10 * np.log10(snr)
+
+        return snr_db
+
+    def _calculate_sensing_snr_legal(self, uav_position, power_allocation):
+        d_t = np.linalg.norm(uav_position - self.target_position)
+        d_r = np.linalg.norm(self.target_position - self.radar_receiver_position)
+
+        G_tx = 13
+        G_rx = 13
+        c = 3e8
+        fc = 2.4e9
+        lambda_c = c / fc
+        sigma = 1.0
+
+        P_r = (power_allocation * 10 ** (G_tx / 10) * 10 ** (G_rx / 10) * lambda_c**2 * sigma) / \
+              (((4 * np.pi)**3) * d_t**2 * d_r**2)
+
+        snr = P_r / self.sigma2
+        snr = max(snr, 1e-5)
+        snr_db = 10 * np.log10(snr)
+        return snr_db
+
+    def _calculate_sensing_snr_eavesdropper(self, uav_position, power_allocation):
+        eavesdropper_snr_list = []
+        d_t = np.linalg.norm(uav_position - self.target_position)
+
+        G_tx = 13
+        G_rx = 13
+        c = 3e8
+        fc = 2.4e9
+        lambda_c = c / fc
+        sigma = 1.0
+
+        for k in range(self.K):
+            d_k_r = np.linalg.norm(self.target_position - self.user_positions[k])
+
+            P_r_k = (power_allocation *10 ** (G_tx / 10) * 10 ** (G_rx / 10) * lambda_c**2 * sigma) / \
+                    (((4 * np.pi)**3) * d_t**2 * d_k_r**2)
+
+            snr_k = P_r_k / self.sigma2
+            snr_k = max(snr_k, 1e-5)
+            snr_db_k = 10 * np.log10(snr_k)
+            eavesdropper_snr_list.append(snr_db_k)
+
+        return eavesdropper_snr_list
+
+    def _update_user_positions(self):
+        for k in range(self.K):
+            original_x = self.user_positions[k, 0]
+            original_y = self.user_positions[k, 1]
+            valid = False
+
+            while not valid:
+                move_distance = self.np_random.uniform(0, self.user_move_range)  # 使用可配置的移动范围
+                move_angle = self.np_random.uniform(-np.pi, np.pi)
+
+                delta_x = move_distance * np.cos(move_angle)
+                delta_y = move_distance * np.sin(move_angle)
+
+                new_x = original_x + delta_x
+                new_y = original_y + delta_y
+
+                distance_sq = new_x ** 2 + new_y ** 2
+
+                coord_in_range = (-400 <= new_x <= 400) and (-400 <= new_y <= 400)
+                safe_distance = distance_sq > 10000
+
+                valid = coord_in_range and safe_distance
+
+            self.user_positions[k, 0] = new_x
+            self.user_positions[k, 1] = new_y
