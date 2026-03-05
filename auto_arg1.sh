@@ -26,4 +26,4 @@ python aoto_arg.py \
   --action_smooth_coef 0.1 \
   --user_move_range 20.0 \
   --start_steps 10000 \
-  --cuda cuda:0
+  --cuda cuda:1

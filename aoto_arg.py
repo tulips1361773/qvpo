@@ -118,7 +118,7 @@ def readParser():
 
 
 # ==============================================================================
-# 🔥 核心功能：自动物理校准与参数统计
+# 🔥 核心功能：自动物理校准与参数统计 (已修正版)
 # ==============================================================================
 def softplus(x):
     return np.logaddexp(0, x)
@@ -168,60 +168,43 @@ def calc_physics_raw(env, uav_pos, user_positions, power_alloc):
     return eta_db, np.array(comm_snrs), np.array(eav_snrs)
 
 def auto_tune_params(args):
-    """运行少量仿真，自动设定合适的裁剪值和系数"""
+    """运行少量仿真，自动设定合适的裁剪值和系数 (修复版)"""
     print("\n" + "="*60)
     print("🚀 正在运行自动校准 (Auto-Calibration)...")
     print("   目的：统计物理数值分布，以设定最佳的 Clip 和 Scale 值")
     
-    # 临时环境，不做归一化以便观察物理真值
     env = UAVISACEnvironment(normalize_state=False)
     
     stats = {'eta': [], 'comm_pen_raw': [], 'eav_pen_raw': []}
-    
-    # 采样步数 (增加一点步数以获得更稳定的统计)
     num_episodes = 50
     
     for _ in range(num_episodes):
         obs, _ = env.reset()
         done = False
         while not done:
-            # === 混合策略 ===
-            # 50% 随机探索，50% 启发式飞向目标 (模拟高信噪比场景)
             if np.random.rand() < 0.5:
                 action = env.action_space.sample()
             else:
-                # 向量导引：飞向 target_position
                 target_vec = env.target_position[:2] - env.uav_position[:2]
                 dist = np.linalg.norm(target_vec)
-                if dist > 1.0:
-                    target_vec = target_vec / dist 
-                
-                # Action: [Angle, Dist, Power] (假设 Angle 归一化为 [-1, 1])
+                if dist > 1.0: target_vec = target_vec / dist
                 angle = np.arctan2(target_vec[1], target_vec[0]) / np.pi 
-                # 稍微加点噪声防止死循环
                 angle += np.random.normal(0, 0.1)
-                action = np.array([angle, 1.0, 1.0], dtype=np.float32) # 全速，全功率
+                action = np.array([angle, 1.0, 1.0], dtype=np.float32)
                 action = np.clip(action, -1.0, 1.0)
             
-            # 环境步进
             _, _, done, _, _ = env.step(action)
-            
-            # 物理重算 (使用 helper 函数提取原始值)
             p_val = (action[2] + 1)/2 * env.P_max
             eta, comms, eavs = calc_physics_raw(env, env.uav_position, env.user_positions, p_val)
             
-            # 1. 记录 Eta (感知 SNR dB)
             stats['eta'].append(eta)
             
-            # 2. 记录 Comm Penalty Raw (Softplus 后，未裁剪，未加权)
             gaps = args.comm_threshold - comms
             pens = softplus(gaps)
-            valid_pens = pens[pens > 0.01] # 只记录实际产生的惩罚
+            valid_pens = pens[pens > 0.01]
             if len(valid_pens) > 0:
                 stats['comm_pen_raw'].extend(valid_pens)
                 
-            # 3. 记录 Eav Penalty Raw (LogSumExp -> Softplus 后，未裁剪，未加权)
-            # 使用 LogSumExp 聚合所有用户
             m = np.max(eavs)
             agg = m + np.log(np.sum(np.exp(eavs - m)))
             gap_e = agg - args.eav_threshold
@@ -231,65 +214,43 @@ def auto_tune_params(args):
                 
     env.close()
     
-    # === 统计与参数计算 ===
     eta_arr = np.array(stats['eta'])
     comm_arr = np.array(stats['comm_pen_raw'])
     eav_arr = np.array(stats['eav_pen_raw'])
     
-    # 1. 确定基准值 (Eta Max)
-    # 这是我们奖励函数的“锚点”，惩罚项的量级应该向它看齐
     if len(eta_arr) > 0:
         p95_eta = np.percentile(eta_arr, 95)
-        ref_max_reward = max(p95_eta, 5.0) # 至少保证有个底线
+        ref_max_reward = max(p95_eta, 5.0)
     else:
-        ref_max_reward = 20.0 # 默认经验值
+        ref_max_reward = 20.0
         
     print(f"   [统计] 感知SNR (Eta) P95: {ref_max_reward:.2f}")
 
-    # 2. 确定 Clip 值 (取整)
-    # Comm Clip
     if len(comm_arr) > 0:
         p95_comm = np.percentile(comm_arr, 95)
         args.comm_penalty_clip_per_user = float(np.ceil(p95_comm))
-        # 总裁剪值设为单用户裁剪值的 1.5 倍 (经验值，允许同时有1-2个用户违约)
         args.comm_penalty_clip_total = float(np.ceil(args.comm_penalty_clip_per_user * 1.5))
     else:
-        # 如果采样期间没发生严重违约，给默认安全值
         args.comm_penalty_clip_per_user = 10.0
         args.comm_penalty_clip_total = 15.0
 
-    # Eav Clip
     if len(eav_arr) > 0:
         p95_eav = np.percentile(eav_arr, 95)
         args.eav_penalty_clip_max = float(np.ceil(p95_eav))
     else:
         args.eav_penalty_clip_max = 10.0
         
-    # 3. 确定 Coef (关键逻辑修正)
-    # 目标：Max_Weighted_Penalty ≈ 1.0 * Max_Reward (Eta)
-    # 这样当惩罚拉满时，奖励归零，迫使 Agent 权衡。
-    
-    # Comm Coef
-    # 公式: coef * clip_total = ref_max_reward
     raw_comm_coef = ref_max_reward / max(args.comm_penalty_clip_total, 1.0)
-    args.comm_penalty_coef = round(raw_comm_coef, 1) # 保留一位小数
+    args.comm_penalty_coef = round(raw_comm_coef, 1)
     
-    # Eav Coef
-    # 公式: coef * clip_max = ref_max_reward
     raw_eav_coef = ref_max_reward / max(args.eav_penalty_clip_max, 1.0)
-    args.eav_penalty_coef = round(raw_eav_coef, 1) # 保留一位小数
+    args.eav_penalty_coef = round(raw_eav_coef, 1)
     
-    # 4. 确定 Reward Scale
-    # 估计值域范围: [Min, Max]
-    # Max ≈ Eta (20)
-    # Min ≈ Eta - Comm_Max_Pen - Eav_Max_Pen ≈ 20 - 20 - 20 = -20
-    # 总 Range ≈ 40. Scale ≈ 2.0 / 40 = 0.05
-    # 我们用计算出的值动态设定
     est_max_pen_total = (args.comm_penalty_clip_total * args.comm_penalty_coef) + \
                         (args.eav_penalty_clip_max * args.eav_penalty_coef)
     
     est_range = ref_max_reward + est_max_pen_total
-    args.reward_scale = round(2.0 / est_range, 3) # Scale 保留3位更合适，太粗容易梯度消失
+    args.reward_scale = round(2.0 / est_range, 3)
 
     print(f"✅ 校准完成! 参数已更新:")
     print(f"   --eav_penalty_clip_max: {args.eav_penalty_clip_max}")
@@ -302,10 +263,10 @@ def auto_tune_params(args):
     print("="*60 + "\n")
     return args
 
-def evaluate(env, agent, steps, source_env=None):
-    """评估函数"""
+
+def evaluate(env, agent, steps, source_env=None, args=None):
+    """评估函数：增加物理中断率统计"""
     if source_env is not None and hasattr(source_env, 'state_normalizer') and hasattr(env, 'state_normalizer'):
-        # 同步归一化统计量
         env.state_normalizer.mean = source_env.state_normalizer.mean.copy()
         env.state_normalizer.var = source_env.state_normalizer.var.copy()
         env.state_normalizer.count = source_env.state_normalizer.count
@@ -315,6 +276,11 @@ def evaluate(env, agent, steps, source_env=None):
     
     episodes = 10
     returns = np.zeros((episodes,), dtype=np.float32)
+    
+    # 统计计数器
+    total_eval_steps = 0
+    total_comm_outages = 0
+    total_secrecy_outages = 0
     
     for i in range(episodes):
         state, _ = env.reset()
@@ -327,6 +293,22 @@ def evaluate(env, agent, steps, source_env=None):
             next_state, reward, done, truncated, _ = env.step(action)
             episode_reward += reward
             state = next_state
+            
+            # --- 物理性能统计 ---
+            total_eval_steps += 1
+            # 还原功率 P = (act + 1)/2 * P_max
+            p_val = (action[2] + 1)/2 * env.P_max
+            # 计算真实物理值
+            _, comms, eavs = calc_physics_raw(env, env.uav_position, env.user_positions, p_val)
+            
+            # 1. 通信中断判定: 任意用户 SNR < 阈值 即视为系统中断
+            #    注意: args.comm_threshold 是 dB 值
+            if np.any(comms < args.comm_threshold):
+                total_comm_outages += 1
+                
+            # 2. 窃听判定: 任意用户被窃听 SNR > 阈值 即视为泄密
+            if np.any(eavs > args.eav_threshold):
+                total_secrecy_outages += 1
         
         returns[i] = episode_reward
     
@@ -336,13 +318,18 @@ def evaluate(env, agent, steps, source_env=None):
     mean_return = np.mean(returns)
     std_return = np.std(returns)
     
+    # 计算概率
+    comm_outage_prob = total_comm_outages / max(total_eval_steps, 1)
+    secrecy_outage_prob = total_secrecy_outages / max(total_eval_steps, 1)
+    
     print('-' * 60)
     print(f'Num steps: {steps:<5}  '
-          f'reward: {mean_return:<5.1f}  '
-          f'std: {std_return:<5.1f}')
+          f'Return: {mean_return:<5.1f}  '
+          f'Comm Outage: {comm_outage_prob:.2%}  '
+          f'Secrecy Outage: {secrecy_outage_prob:.2%}')
     print(returns)
     print('-' * 60)
-    return mean_return
+    return mean_return, comm_outage_prob, secrecy_outage_prob
 
 
 def main(args=None, logger=None, id=None):
@@ -434,6 +421,11 @@ def main(args=None, logger=None, id=None):
         done = False
         truncated = False
         
+        # 训练过程中的物理统计
+        ep_comm_outage_steps = 0
+        ep_secrecy_outage_steps = 0
+        ep_eta_sum = 0.0
+        
         state, _ = env.reset(seed=args.seed + episodes)
         episodes += 1
         
@@ -444,13 +436,24 @@ def main(args=None, logger=None, id=None):
                 action = agent.sample_action(state, eval=False)
             
             next_state, reward, done, truncated, info = env.step(action)
+            
+            # --- 统计物理指标 (训练中) ---
+            # 1. 提取或计算物理值
+            p_val = (action[2] + 1)/2 * env.P_max
+            eta_val, comms_val, eavs_val = calc_physics_raw(env, env.uav_position, env.user_positions, p_val)
+            
+            # 2. 累加统计
+            ep_eta_sum += eta_val
+            if np.any(comms_val < args.comm_threshold):
+                ep_comm_outage_steps += 1
+            if np.any(eavs_val > args.eav_threshold):
+                ep_secrecy_outage_steps += 1
 
-            # 记录详细的奖励项
+            # 3. 记录 Reward 组件
             if steps % 200 == 0:
                 writer.add_scalar('reward_terms/eta_0', float(info.get('eta_0', 0.0)), steps)
-                writer.add_scalar('reward_terms/comm_penalty_raw', float(info.get('comm_penalty', 0.0)), steps) # Before Coef
-                writer.add_scalar('reward_terms/eav_penalty_raw', float(info.get('eav_penalty_clipped', 0.0)), steps) # Before Coef but after clip
-                writer.add_scalar('reward_terms/reward_raw', float(info.get('reward_raw', 0.0)), steps)
+                writer.add_scalar('reward_terms/comm_penalty_raw', float(info.get('comm_penalty', 0.0)), steps)
+                writer.add_scalar('reward_terms/eav_penalty_raw', float(info.get('eav_penalty_clipped', 0.0)), steps)
                 writer.add_scalar('reward_terms/reward_final', float(info.get('reward_final', reward)), steps)
 
             mask = 0.0 if (done or truncated) else args.gamma
@@ -465,25 +468,44 @@ def main(args=None, logger=None, id=None):
                 agent.entropy_alpha = min(args.entropy_alpha, 
                                          max(0.002, args.entropy_alpha - steps/num_steps * args.entropy_alpha))
 
+            # --- Evaluation ---
             if steps % eval_interval == 0:
                 print(f"\n{'='*60}")
                 print(f"Evaluation at step {steps}")
-                tmp_result = evaluate(eval_env, agent, steps, source_env=env)
-                writer.add_scalar('reward/eval_mean', tmp_result, steps)
+                # 传入 args 以便使用其中的 threshold
+                eval_mean, comm_prob, sec_prob = evaluate(eval_env, agent, steps, source_env=env, args=args)
                 
-                if tmp_result > best_result:
-                    best_result = tmp_result
+                writer.add_scalar('reward/eval_mean', eval_mean, steps)
+                writer.add_scalar('Outcome/Eval_Comm_Outage_Prob', comm_prob, steps)
+                writer.add_scalar('Outcome/Eval_Secrecy_Outage_Prob', sec_prob, steps)
+                
+                # 保存最优模型
+                if eval_mean > best_result:
+                    best_result = eval_mean
                     print(f"New best result: {best_result:.2f}! Saving model...")
                     agent.save_model(os.path.join('./results', prefix + '_' + name), id=id)
 
             state = next_state
 
+        # --- Episode 结束后的统计 ---
         recent_rewards.append(episode_reward)
         ema_reward = episode_reward if ema_reward is None else (0.95 * ema_reward + 0.05 * episode_reward)
+        
+        # 计算本 Episode 的平均物理表现
+        ep_comm_rate = ep_comm_outage_steps / max(episode_steps, 1)
+        ep_sec_rate = ep_secrecy_outage_steps / max(episode_steps, 1)
+        ep_avg_eta = ep_eta_sum / max(episode_steps, 1)
+        
         writer.add_scalar('reward/train', episode_reward, steps)
         writer.add_scalar('reward/train_ema', float(ema_reward), steps)
+        
+        # 新增：记录 Outcome 结果
+        writer.add_scalar('Outcome/Train_Comm_Outage_Rate', ep_comm_rate, steps)
+        writer.add_scalar('Outcome/Train_Secrecy_Outage_Rate', ep_sec_rate, steps)
+        writer.add_scalar('Physics/Avg_Eta', ep_avg_eta, steps)
 
-        print(f'Episode: {episodes:<4} Steps: {episode_steps:<4} Total: {steps:<7} Reward: {episode_reward:<5.1f}')
+        print(f'Episode: {episodes:<4} Steps: {episode_steps:<4} Reward: {episode_reward:<5.1f} '
+              f'CommOut: {ep_comm_rate:.0%} SecOut: {ep_sec_rate:.0%}')
 
         if logger is not None:
             for i in range(episode_steps):
