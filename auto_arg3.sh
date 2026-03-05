@@ -1,0 +1,14 @@
+python aoto_arg.py \
+    --env_name "UAV_ISAC_Secure3" \
+    --seed 101 \
+    --cuda "cuda:0" \
+    --num_steps 2000000 \
+    --eval_sample 64 \
+    --comm_threshold 10.0 \
+    --eav_threshold 10.0 \
+    --batch_size 256 \
+    --diffusion_lr 0.0001 \
+    --action_lr 0.0003 \
+    --policy_type "Diffusion" \
+    --normalize_state True\
+    --gamma 0.99

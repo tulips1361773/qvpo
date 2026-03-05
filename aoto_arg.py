@@ -153,8 +153,8 @@ def calc_physics_raw(env, uav_pos, user_positions, power_alloc):
 
 def auto_tune_params(args):
     print("\n" + "="*60)
-    print("🚀 运行自动校准 (基于基准的惩罚强度校准)...")
-    print("   原则：安全硬约束，惩罚强度基于最大期望感知收益设定。")
+    print("🚀 运行自动校准 (Auto-Calibration) - 优化版")
+    print("   原则：放宽惩罚斜率，避免初期梯度爆炸导致Agent放弃任务。")
     
     env = UAVISACEnvironment(normalize_state=False)
     stats_eta = []
@@ -165,15 +165,14 @@ def auto_tune_params(args):
         env.reset()
         done = False
         while not done:
-            # 混合策略：随机 + 飞向目标
             if np.random.rand() < 0.4:
                 action = env.action_space.sample()
             else:
+                # 简单的飞向目标策略
                 target_vec = env.target_position[:2] - env.uav_position[:2]
                 dist = np.linalg.norm(target_vec)
                 angle = np.arctan2(target_vec[1], target_vec[0]) / np.pi 
                 action = np.array([angle, 1.0, 1.0], dtype=np.float32)
-                
             _, _, done, _, _ = env.step(action)
             p_val = (action[2] + 1)/2 * env.P_max
             eta = env._calculate_sensing_snr_legal(env.uav_position, p_val)
@@ -186,22 +185,21 @@ def auto_tune_params(args):
         R_max = max(p95_eta, 5.0)
     else:
         R_max = 20.0
-    print(f"   --> 最大期望感知收益 (R_max, P95): {R_max:.2f} dB")
+    print(f"   --> 最大期望感知收益 (R_max): {R_max:.2f} dB")
 
-    # 3. 设定惩罚系数 (Prohibitive Cost Calibration)
-    # 逻辑：对于安全 (Eav)，如果违规 1.0 dB，我们希望惩罚值 = 1.5 * R_max
-    # 这确保了即使拿到最大奖励，只要稍微违规，总分也是负的。
+    # 3. 设定惩罚系数 (优化点)
+    # 原逻辑：delta=1.0, beta=1.5 (太陡峭)
+    # 新逻辑：delta=3.0, beta=1.0 (违规3dB时，惩罚等于最大奖励)
+    # 这样给 Agent 一个“软缓冲区”，允许轻微违规，但严重违规依然会被重罚
     
-    # 目标违规容忍度 (Delta) 和 惩罚倍率 (Beta)
-    delta_bad_sec = 1.0 # dB
-    beta_sec = 1.5      # Penalty = 1.5 * R_max
+    delta_bad_sec = 3.0  # 放宽：容忍 3dB 的过渡带
+    beta_sec = 1.2       # 惩罚倍率：违规 3dB 时，惩罚是 R_max 的 1.2 倍
     
-    delta_bad_comm = 2.0 # 通信优先级低，容忍度高一点
-    beta_comm = 0.5      # 通信违规只要扣掉一半收益即可
+    delta_bad_comm = 3.0 
+    beta_comm = 0.5      
     
     # 计算 Eav 系数
     # Formula: coef * softplus(delta) = beta * R_max
-    # softplus(1.0, kappa=2.0) ≈ 1.06
     raw_val_sec = softplus(delta_bad_sec, kappa=2.0)
     args.eav_penalty_coef = round((R_max * beta_sec) / raw_val_sec, 2)
     
@@ -210,19 +208,18 @@ def auto_tune_params(args):
     args.comm_penalty_coef = round((R_max * beta_comm) / raw_val_comm, 2)
     
     # 4. 设定 Reward Scale
-    # 将 R_max 映射到约 2.0 左右，方便神经网络处理
-    args.reward_scale = round(2.0 / R_max, 4)
+    # 稍微调小一点 Scale，让数值更稳定
+    args.reward_scale = round(1.0 / R_max, 4)
     
     print(f"   [2/3] 校准结果:")
-    print(f"   -- 安全系数 (Sec Coef): {args.eav_penalty_coef}")
-    print(f"      (违规 1dB => 惩罚 {args.eav_penalty_coef * raw_val_sec:.1f} ≈ {beta_sec} x R_max)")
+    print(f"   -- 安全系数 (Sec Coef): {args.eav_penalty_coef} (Target: Violate {delta_bad_sec}dB -> Pen {beta_sec}xReward)")
     print(f"   -- 通信系数 (Comm Coef): {args.comm_penalty_coef}")
     print(f"   -- 奖励缩放 (Reward Scale): {args.reward_scale}")
     print("="*60 + "\n")
     return args
 
 def evaluate(env, agent, steps, source_env=None, args=None):
-    """评估函数：修改后的指标"""
+    """评估函数：增加详细的奖励成分分解与物理行为监控"""
     if source_env and hasattr(source_env, 'state_normalizer'):
         env.state_normalizer.mean = source_env.state_normalizer.mean.copy()
         env.state_normalizer.var = source_env.state_normalizer.var.copy()
@@ -233,9 +230,16 @@ def evaluate(env, agent, steps, source_env=None, args=None):
     returns = np.zeros(episodes)
     total_steps = 0
     
-    # 指标计数
-    total_sec_outages = 0
-    max_sec_violation_global = 0.0
+    # --- 新增：详细统计累加器 ---
+    metrics = {
+        'leakage_count': 0,
+        'max_violation': 0.0,
+        'accum_eta': 0.0,          # 累积感知 SNR (正收益来源)
+        'accum_sec_pen': 0.0,      # 累积安全惩罚 (权重后)
+        'accum_comm_pen': 0.0,     # 累积通信惩罚 (权重后)
+        'accum_power': 0.0,        # 累积发射功率 (0-1比率)
+        'accum_dist': 0.0          # 累积与目标距离
+    }
     
     for i in range(episodes):
         state, _ = env.reset()
@@ -244,24 +248,43 @@ def evaluate(env, agent, steps, source_env=None, args=None):
         
         while not done:
             action = agent.sample_action(state, eval=True)
-            next_state, reward, done, _, _ = env.step(action)
+            next_state, reward, done, _, info = env.step(action)
             episode_reward += reward
             state = next_state
             total_steps += 1
             
-            # 物理统计
+            # --- 1. 物理违规统计 ---
             p_val = (action[2] + 1)/2 * env.P_max
+            # 重新计算物理值用于统计 (或者直接信赖 info 中的值，这里重新计算更稳妥)
             _, _, eavs = calc_physics_raw(env, env.uav_position, env.user_positions, p_val)
-            
-            # 统计安全
-            # 找出最大窃听SNR
             max_eav = np.max(eavs)
             gap = max_eav - args.eav_threshold
             
             if gap > 0:
-                total_sec_outages += 1
-                if gap > max_sec_violation_global:
-                    max_sec_violation_global = gap
+                metrics['leakage_count'] += 1
+                if gap > metrics['max_violation']:
+                    metrics['max_violation'] = gap
+            
+            # --- 2. 奖励成分拆解 (从 info 获取) ---
+            # myenv3.py 的 info 中包含: eta_0, eav_penalty_weighted, comm_penalty (unweighted raw avg)
+            # 注意: 这里需要确保 myenv3 返回的 comm_penalty 是我们想要的。
+            # 如果 myenv3 中是 R_comm = avg_clipped * coef，info['comm_penalty'] 最好是最终扣的分
+            
+            metrics['accum_eta'] += info.get('eta_0', 0.0)
+            metrics['accum_sec_pen'] += info.get('eav_penalty_weighted', 0.0)
+            
+            # 手动计算一下加权后的通信惩罚，或者假设 info 里的是原始值
+            # 假设 info['comm_penalty'] 是原始平均惩罚，我们需要乘系数
+            raw_comm = info.get('comm_penalty', 0.0)
+            # 由于 myenv3 中可能有截断，这里近似计算
+            metrics['accum_comm_pen'] += raw_comm * args.comm_penalty_coef
+            
+            # --- 3. 动作行为统计 ---
+            # action[1] 是距离: [-1, 1] -> [0, l_max] ? 不对，step里是 action[1] * l_max
+            # 让我们直接看物理距离
+            dist_to_target = np.linalg.norm(env.uav_position - env.target_position)
+            metrics['accum_dist'] += dist_to_target
+            metrics['accum_power'] += (action[2] + 1) / 2  # 0.0 - 1.0
         
         returns[i] = episode_reward
     
@@ -269,27 +292,44 @@ def evaluate(env, agent, steps, source_env=None, args=None):
         env.state_normalizer.set_training(True)
     
     mean_return = np.mean(returns)
-    # 感知泄露率
-    leakage_rate = total_sec_outages / max(total_steps, 1)
+    
+    # --- 计算平均值 ---
+    avg_leakage = metrics['leakage_count'] / max(total_steps, 1)
+    avg_eta = metrics['accum_eta'] / max(total_steps, 1)
+    avg_sec_pen = metrics['accum_sec_pen'] / max(total_steps, 1)
+    avg_comm_pen = metrics['accum_comm_pen'] / max(total_steps, 1)
+    avg_power = metrics['accum_power'] / max(total_steps, 1)
+    avg_dist = metrics['accum_dist'] / max(total_steps, 1)
     
     print('-' * 60)
-    print(f'Eval Steps: {steps:<5} | Return: {mean_return:<5.1f}')
-    print(f'Metrics: Sensing Leakage Rate: {leakage_rate:.2%} | Max Violation: {max_sec_violation_global:.2f} dB')
+    print(f'Eval Step {steps} | Ret: {mean_return:.2f}')
+    print(f'   [Gain] Eta (Sense): {avg_eta:.2f} dB')
+    print(f'   [Loss] Sec Pen: {avg_sec_pen:.2f} | Comm Pen: {avg_comm_pen:.2f}')
+    print(f'   [Phys] Power: {avg_power:.2%} | Dist: {avg_dist:.1f}m')
+    print(f'   [Stat] Leakage: {avg_leakage:.1%} | Max Viol: {metrics["max_violation"]:.2f} dB')
     print('-' * 60)
     
-    return mean_return, leakage_rate, max_sec_violation_global
+    return {
+        'mean_return': mean_return,
+        'leakage_rate': avg_leakage,
+        'max_violation': metrics['max_violation'],
+        'avg_eta': avg_eta,
+        'avg_sec_pen': avg_sec_pen,
+        'avg_comm_pen': avg_comm_pen,
+        'avg_power': avg_power,
+        'avg_dist': avg_dist
+    }
 
 def main(args=None, logger=None, id=None):
     # 执行自动校准
     args = auto_tune_params(args)
     
-    # 设置 Tensorboard
     dir = "record"
     log_dir = os.path.join(dir, f'{args.env_name}', f'policy_type={args.policy_type}', f'seed={args.seed}')
     if id: log_dir = os.path.join(log_dir, f'run_id={id}')
     writer = SummaryWriter(log_dir)
 
-    # 实例化环境 (使用校准后的参数)
+    # 实例化环境
     env_kwargs = {
         'normalize_state': args.normalize_state,
         'comm_threshold': args.comm_threshold,
@@ -297,8 +337,8 @@ def main(args=None, logger=None, id=None):
         'comm_penalty_coef': args.comm_penalty_coef,
         'eav_penalty_coef': args.eav_penalty_coef,
         'reward_scale': args.reward_scale,
-        'comm_penalty_clip_total': args.comm_penalty_clip_total, # 大值
-        'eav_penalty_clip_max': 1e5, # 实际上已移除
+        'comm_penalty_clip_total': args.comm_penalty_clip_total,
+        'eav_penalty_clip_max': 1e5,
     }
     
     env = UAVISACEnvironment(**env_kwargs)
@@ -319,12 +359,17 @@ def main(args=None, logger=None, id=None):
     episodes = 0
     best_result = -float('inf')
     
-    print("Starting Training (Focus: Sensing Security)...")
+    print("Starting Training...")
     
     while steps < args.num_steps:
         state, _ = env.reset(seed=args.seed + episodes)
         done = False
         ep_reward = 0
+        ep_steps = 0
+        
+        # 训练过程中的物理统计 (用于填充 Outcome 图表)
+        train_sec_outages = 0
+        train_comm_outages = 0
         episodes += 1
         
         while not done:
@@ -335,8 +380,19 @@ def main(args=None, logger=None, id=None):
             
             next_state, reward, done, _, info = env.step(action)
             steps += 1
+            ep_steps += 1
             ep_reward += reward
             
+            # --- 统计训练时的物理违规情况 ---
+            p_val = (action[2] + 1)/2 * env.P_max
+            _, comms, eavs = calc_physics_raw(env, env.uav_position, env.user_positions, p_val)
+            
+            if np.any(eavs > args.eav_threshold):
+                train_sec_outages += 1
+            if np.any(comms < args.comm_threshold):
+                train_comm_outages += 1
+            # ------------------------------------
+
             mask = 0.0 if done else args.gamma
             agent.append_memory(state, action, reward, next_state, mask)
             
@@ -347,20 +403,45 @@ def main(args=None, logger=None, id=None):
                 writer.add_scalar('reward_terms/weighted_eav_penalty', info.get('eav_penalty_weighted', 0), steps)
                 writer.add_scalar('reward_terms/raw_eta', info.get('eta_0', 0), steps)
 
+    # 在 while steps < args.num_steps 循环内:
+    
             if steps % 5000 == 0:
-                # 评估
-                ret, leakage, max_viol = evaluate(eval_env, agent, steps, env, args)
-                writer.add_scalar('reward/eval_mean', ret, steps)
-                writer.add_scalar('Outcome/Sensing_Leakage_Rate', leakage, steps)
-                writer.add_scalar('Outcome/Max_Secrecy_Violation_dB', max_viol, steps)
+                # 调用修改后的 evaluate，它现在返回一个字典
+                eval_metrics = evaluate(eval_env, agent, steps, env, args)
                 
-                if ret > best_result:
-                    best_result = ret
+                # 记录原来的指标
+                writer.add_scalar('reward/eval_mean', eval_metrics['mean_return'], steps)
+                writer.add_scalar('Outcome/Eval_Sensing_Leakage_Rate', eval_metrics['leakage_rate'], steps)
+                writer.add_scalar('Outcome/Eval_Max_Secrecy_Violation_dB', eval_metrics['max_violation'], steps)
+                
+                # 🔥 新增：详细诊断指标 🔥
+                # 1. 奖励成分分析：看谁在拖后腿
+                writer.add_scalar('Diagnosis/Avg_Sensing_Gain_dB', eval_metrics['avg_eta'], steps)
+                writer.add_scalar('Diagnosis/Avg_Secrecy_Penalty', eval_metrics['avg_sec_pen'], steps)
+                writer.add_scalar('Diagnosis/Avg_Comm_Penalty', eval_metrics['avg_comm_pen'], steps)
+                
+                # 2. 行为分析：Agent 是不是怂了（功率低）或者跑了（距离远）
+                writer.add_scalar('Diagnosis/Action_Avg_Power_Ratio', eval_metrics['avg_power'], steps)
+                writer.add_scalar('Diagnosis/Action_Avg_Distance_m', eval_metrics['avg_dist'], steps)
+                
+                 # 新增几何分析图表
+                writer.add_scalar('Diagnosis/Avg_Min_User_Distance', eval_metrics['avg_min_user_dist'], steps)
+                writer.add_scalar('Diagnosis/Favorable_Geometry_Ratio', eval_metrics['favorable_ratio'], steps)
+                
+                if eval_metrics['mean_return'] > best_result:
+                    best_result = eval_metrics['mean_return']
                     agent.save_model(os.path.join('./results', f'{args.env_name}'), id)
             
             state = next_state
             
+        # 记录 Episode 级别的统计
         writer.add_scalar('reward/train', ep_reward, steps)
+        
+        # 记录训练过程中的 Outage Rates (解决空图问题)
+        train_sec_rate = train_sec_outages / max(ep_steps, 1)
+        train_comm_rate = train_comm_outages / max(ep_steps, 1)
+        writer.add_scalar('Outcome/Train_Secrecy_Outage_Rate', train_sec_rate, steps)
+        writer.add_scalar('Outcome/Train_Comm_Outage_Rate', train_comm_rate, steps)
 
     env.close()
     writer.close()
