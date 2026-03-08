@@ -1,5 +1,4 @@
-#测试添加动作掩码+奖励裁剪精简之后的效果
-#3/8 20:51
+# 3/8 21:30
 python main.py \
   --env_name Env \
   --seed 42 \
@@ -29,8 +28,8 @@ python main.py \
   --user_move_range 20.0 \
   --reward_scale 0.1 \
   --eav_threshold 10.0 \
-  --eav_penalty_coef 0.5 \
-  --eav_penalty_clip_max 20.0 \
+  --eav_penalty_coef 5 \
+  --eav_penalty_clip_max 200.0 \
   --comm_threshold 10.0 \
   --comm_penalty_coef 1.5 \
   --comm_softplus_kappa 5.0 \

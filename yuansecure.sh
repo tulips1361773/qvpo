@@ -1,5 +1,5 @@
-#测试添加动作掩码+奖励裁剪精简之后的效果
-#3/8 20:51
+#测试添加动作掩码+奖励裁剪精简之后的效果  添加泄漏率
+#3/8 22:06
 python main.py \
   --env_name Env \
   --seed 42 \
@@ -37,4 +37,4 @@ python main.py \
   --comm_penalty_cap_per_user 15.0 \
   --comm_penalty_cap_total 30.0 \
   --start_steps 10000 \
-  --cuda cuda:0
+  --cuda cuda:2
