@@ -387,6 +387,16 @@ def main(args=None, logger=None, id=None):
                 writer.add_scalar('reward_terms/comm_penalty_clipped', float(info.get('comm_penalty_clipped', 0.0)), steps)
                 writer.add_scalar('reward_terms/eav_penalty_clipped', float(info.get('eav_penalty_clipped', 0.0)), steps)
                 
+                # 感知泄漏率相关指标
+                step_leakage_count = info.get('leakage_count', 0)
+                step_total_users = info.get('total_users', 0)
+                if step_total_users > 0:
+                    step_leakage_rate = step_leakage_count / step_total_users
+                    writer.add_scalar('security/step_leakage_rate', step_leakage_rate, steps)
+                writer.add_scalar('security/step_leakage_count', float(step_leakage_count), steps)
+                writer.add_scalar('security/eav_penalty_raw', float(info.get('eav_penalty_raw', 0.0)), steps)
+                writer.add_scalar('security/eav_penalty_weighted', float(info.get('eav_penalty_weighted', 0.0)), steps)
+                
                 # 训练泄露率（每200步记录一次累计泄露率）
                 if train_total_users > 0:
                     train_leakage_rate = train_leakage_count / train_total_users

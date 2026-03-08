@@ -1,7 +1,7 @@
 python main.py \
   --env_name Env \
   --seed 42 \
-  --num_steps 1000 \
+  --num_steps 250000 \
   --batch_size 512 \
   --gamma 0.99 \
   --tau 0.005 \
@@ -34,5 +34,5 @@ python main.py \
   --comm_softplus_kappa 5.0 \
   --comm_penalty_cap_per_user 15.0 \
   --comm_penalty_cap_total 30.0 \
-  --start_steps 100 \
+  --start_steps 10000 \
   --cuda cuda:0

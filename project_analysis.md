@@ -19,7 +19,7 @@
 | `agent/qvpo.py` | QVPO 智能体实现 |
 | `agent/diffusion.py` | Diffusion Policy |
 | `agent/flow_matching.py` | Flow Matching Policy |
-
+conda环境：qvpo
 ### 1.3 当前问题
 - **训练结果**：稳定，reward 高于基线
 - **关键问题**：感知信息泄露率高达 **70%**

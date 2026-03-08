@@ -199,7 +199,9 @@ class UAVISACEnvironment(gym.Env):
             raw_reward = -100.0 # 越界重罚
             info = {
                 'eta_0': 0.0, 'comm_penalty': 0.0, 'eav_penalty': 0.0,
-                'reward_final': raw_reward * self.reward_scale
+                'reward_final': raw_reward * self.reward_scale,
+                'leakage_count': 0,
+                'total_users': self.K,
             }
         else:
             # 正常计算奖励
@@ -251,8 +253,16 @@ class UAVISACEnvironment(gym.Env):
         R_eav = 0.0
         eav_penalty_raw = 0.0
         
+        # 感知泄漏率统计：统计有多少用户的窃听SNR超过阈值
+        leakage_count = 0
+        total_users = self.K
+        
         if len(eavesdropper_snr_list) > 0:
             eav_snrs = np.array(eavesdropper_snr_list, dtype=np.float32)
+            
+            # 统计泄漏用户数（SNR超过阈值的用户）
+            leakage_count = int(np.sum(eav_snrs > self.eav_threshold))
+            
             # 使用 Max 策略，只要有一个窃听者超标，就算违规
             max_eav_snr = np.max(eav_snrs)
             
@@ -296,6 +306,8 @@ class UAVISACEnvironment(gym.Env):
             'eav_penalty_weighted': float(R_eav),
             'comm_penalty': float(avg_comm_penalty),
             'reward_raw': float(reward),
+            'leakage_count': leakage_count,
+            'total_users': total_users,
         }
         return reward, info
 
