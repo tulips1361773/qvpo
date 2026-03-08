@@ -398,6 +398,13 @@ class UAVISACEnvironment(gym.Env):
         reward -= comm_penalty_clipped
 
         eavesdropper_snr_list = self._calculate_sensing_snr_eavesdropper(uav_position, power_allocation)
+        
+        # 计算每个用户的泄露状态（用于泄露率统计）
+        leakage_count = 0
+        for snr_k in eavesdropper_snr_list:
+            if snr_k > self.eav_threshold:
+                leakage_count += 1
+        
         if len(eavesdropper_snr_list) == 0:
             sensing_snr_eavesdropper = 0.0
         elif self.eav_agg == 'max':
@@ -430,14 +437,28 @@ class UAVISACEnvironment(gym.Env):
             'comm_penalty_clipped': float(comm_penalty_clipped),  # 建议3: 裁剪后的通信惩罚
             'snr_gap2':float(snr_gap2),
             'eav_penalty': float(eav_penalty),
+            # 计算泄露用户数
+        leakage_count = sum(1 for snr in eavesdropper_snr_list if snr > self.eav_threshold)
+        
+        info = {
+            'eta_0': float(eta_0),
+            'eta_0_clipped': float(eta_0_clipped),  # 建议3: 裁剪后的感知SNR
+            'comm_penalty': float(comm_penalty),
+            'comm_penalty_clipped': float(comm_penalty_clipped),  # 建议3: 裁剪后的通信惩罚
+            'snr_gap2':float(snr_gap2),
+            'eav_penalty': float(eav_penalty),
             'eav_penalty_clipped': float(eav_penalty_clipped) if snr_gap2 > 0 else 0.0,  # 建议3: 裁剪后的窃听惩罚
             'energy_penalty': 0.0,
             'boundary_penalty': 0.0,
             'reward_raw': float(reward),
+            'eavesdropper_snr_list': eavesdropper_snr_list,  # 添加窃听SNR列表用于泄露率计算
+            'leakage_count': leakage_count,  # 本步泄露的用户数
+            'total_users': self.K,  # 总用户数
         }
 
         return reward, info
 
+# ...
     def _calculate_communication_snr(self, distance, power_allocation):
         # 通信模型中的信道增益计算
         c1 = 12.081

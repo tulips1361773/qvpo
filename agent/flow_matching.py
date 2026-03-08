@@ -84,7 +84,7 @@ class FlowMatchingPolicy(nn.Module):
         return x
 
     @torch.no_grad()
-    def sample(self, state, eval=False, q_func=None, normal=False):
+    def sample(self, state, eval=False, q_func=None, normal=False, env_info=None):
         if normal:
             batch_size = state.shape[0]
             shape = (batch_size, self.action_dim)
@@ -111,6 +111,52 @@ class FlowMatchingPolicy(nn.Module):
         # Reshape & Select Best
         action_rep = action_rep.view(sample_count, raw_batch_size, -1).transpose(0, 1)
         q = q.view(sample_count, raw_batch_size, -1).transpose(0, 1)
+        
+        # ========== Physics-Informed Masked Action Selection ==========
+        if env_info is not None and raw_batch_size == 1:
+            uav_x = env_info.get('uav_x', 0.0)
+            uav_y = env_info.get('uav_y', 0.0)
+            l_max = env_info.get('l_max', 100.0)
+            x_min = env_info.get('x_min', -400.0)
+            x_max = env_info.get('x_max', 400.0)
+            y_min = env_info.get('y_min', -400.0)
+            y_max = env_info.get('y_max', 400.0)
+            
+            # action_rep: (1, sample_count, action_dim)
+            # action[0] = angle (normalized, *pi), action[1] = distance (normalized, *l_max)
+            actions_np = action_rep[0].cpu().numpy()  # (sample_count, 3)
+            q_np = q[0].cpu().numpy().flatten()  # (sample_count,)
+            
+            valid_mask = np.ones(sample_count, dtype=bool)
+            
+            for i in range(sample_count):
+                angle = actions_np[i, 0] * np.pi
+                distance = actions_np[i, 1] * l_max
+                
+                delta_x = distance * np.cos(angle)
+                delta_y = distance * np.sin(angle)
+                
+                new_x = uav_x + delta_x
+                new_y = uav_y + delta_y
+                
+                # 检查边界
+                if new_x < x_min or new_x > x_max or new_y < y_min or new_y > y_max:
+                    valid_mask[i] = False
+            
+            # 在合法动作中选择 Q 值最大的
+            if np.any(valid_mask):
+                valid_indices = np.where(valid_mask)[0]
+                valid_q = q_np[valid_indices]
+                best_valid_idx = valid_indices[np.argmax(valid_q)]
+                best_action = action_rep[0, best_valid_idx:best_valid_idx+1, :]
+            else:
+                # Fallback: 所有动作都越界，选择移动距离最小的动作（接近原地悬停）
+                distances = np.abs(actions_np[:, 1])  # action[1] 是归一化的距离
+                fallback_idx = np.argmin(distances)
+                best_action = action_rep[0, fallback_idx:fallback_idx+1, :]
+            
+            return best_action.view(raw_batch_size, -1)
+        # ========== End of Physics-Informed Masking ==========
         
         action_idx = torch.argmax(q, dim=1, keepdim=True).repeat(1, 1, self.action_dim)
         best_action = action_rep.gather(dim=1, index=action_idx).view(raw_batch_size, -1)
@@ -154,5 +200,5 @@ class FlowMatchingPolicy(nn.Module):
             
             return flat_state, flat_action, (flat_q, v), (mean, std)
 
-    def forward(self, state, eval=False, q_func=None, normal=False):
-        return self.sample(state, eval, q_func, normal)
+    def forward(self, state, eval=False, q_func=None, normal=False, env_info=None):
+        return self.sample(state, eval, q_func, normal, env_info)

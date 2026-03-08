@@ -15,7 +15,7 @@ from logger import Logger
 import datetime
 
 # 修改1: 导入自定义环境
-from myenv import UAVISACEnvironment
+from myenv3 import UAVISACEnvironment
 
 
 def _str2bool(v):
@@ -125,7 +125,7 @@ def readParser():
     parser.add_argument('--entropy_alpha', type=float, default=0.05, metavar='G', 
                         help="entropy_alpha (default: 0.05)")
 
-    parser.add_argument('--eav_agg', type=str, default='logsumexp', choices=['max', 'top2', 'logsumexp'],
+    parser.add_argument('--eav_agg', type=str, default='top2', choices=['max', 'top2', 'logsumexp'],
                         help="eavesdropper SNR aggregation (default: logsumexp)")
     parser.add_argument('--eav_logsumexp_kappa', type=float, default=0.5, metavar='G',
                         help="logsumexp kappa for eav_agg=logsumexp (default: 0.5)")
@@ -198,6 +198,10 @@ def evaluate(env, agent, steps, source_env=None):
     episodes = 10
     returns = np.zeros((episodes,), dtype=np.float32)
     
+    # 评估泄露率统计
+    eval_leakage_count = 0
+    eval_total_users = 0
+    
     for i in range(episodes):
         state, _ = env.reset()
         episode_reward = 0.
@@ -205,10 +209,23 @@ def evaluate(env, agent, steps, source_env=None):
         truncated = False
         
         while not (done or truncated):
-            action = agent.sample_action(state, eval=True)
-            next_state, reward, done, truncated, _ = env.step(action)
+            env_info = {
+                'uav_x': env.uav_position[0],
+                'uav_y': env.uav_position[1],
+                'l_max': env.l_max,
+                'x_min': env.X_min,
+                'x_max': env.X_max,
+                'y_min': env.Y_min,
+                'y_max': env.Y_max,
+            }
+            action = agent.sample_action(state, eval=True, env_info=env_info)
+            next_state, reward, done, truncated, info = env.step(action)
             episode_reward += reward
             state = next_state
+            
+            # 累计泄露率统计
+            eval_leakage_count += info.get('leakage_count', 0)
+            eval_total_users += info.get('total_users', 0)
         
         returns[i] = episode_reward
     
@@ -219,13 +236,17 @@ def evaluate(env, agent, steps, source_env=None):
     mean_return = np.mean(returns)
     std_return = np.std(returns)
     
+    # 计算评估泄露率
+    eval_leakage_rate = eval_leakage_count / eval_total_users if eval_total_users > 0 else 0.0
+    
     print('-' * 60)
     print(f'Num steps: {steps:<5}  '
           f'reward: {mean_return:<5.1f}  '
-          f'std: {std_return:<5.1f}')
+          f'std: {std_return:<5.1f}  '
+          f'leakage_rate: {eval_leakage_rate:.2%}')
     print(returns)
     print('-' * 60)
-    return mean_return
+    return mean_return, eval_leakage_rate
 
 
 def main(args=None, logger=None, id=None):
@@ -247,48 +268,32 @@ def main(args=None, logger=None, id=None):
     
     env = UAVISACEnvironment(
         normalize_state=args.normalize_state,
-        eav_agg=args.eav_agg,
-        eav_logsumexp_kappa=args.eav_logsumexp_kappa,
         eav_threshold=args.eav_threshold,
         eav_penalty_coef=args.eav_penalty_coef,
-        eav_penalty_cap=args.eav_penalty_cap,
-        comm_penalty_type=args.comm_penalty,
+        eav_penalty_clip_max=args.eav_penalty_clip_max,
         comm_threshold=args.comm_threshold,
         comm_penalty_coef=args.comm_penalty_coef,
         comm_softplus_kappa=args.comm_softplus_kappa,
-        comm_huber_delta=args.comm_huber_delta,
-        comm_penalty_cap_per_user=args.comm_penalty_cap_per_user,
-        comm_penalty_cap_total=args.comm_penalty_cap_total,
-        comm_penalty_avg_over_k=args.comm_penalty_avg_over_k,
+        comm_penalty_clip_per_user=args.comm_penalty_cap_per_user,
+        comm_penalty_clip_total=args.comm_penalty_cap_total,
         action_smooth_coef=args.action_smooth_coef,
         user_move_range=args.user_move_range,
         reward_scale=args.reward_scale,
-        eta_clip_max=args.eta_clip_max,
-        comm_penalty_clip_max=args.comm_penalty_clip_max,
-        eav_penalty_clip_max=args.eav_penalty_clip_max,
     )
     
     eval_env = UAVISACEnvironment(
         normalize_state=args.normalize_state,
-        eav_agg=args.eav_agg,
-        eav_logsumexp_kappa=args.eav_logsumexp_kappa,
         eav_threshold=args.eav_threshold,
         eav_penalty_coef=args.eav_penalty_coef,
-        eav_penalty_cap=args.eav_penalty_cap,
-        comm_penalty_type=args.comm_penalty,
+        eav_penalty_clip_max=args.eav_penalty_clip_max,
         comm_threshold=args.comm_threshold,
         comm_penalty_coef=args.comm_penalty_coef,
         comm_softplus_kappa=args.comm_softplus_kappa,
-        comm_huber_delta=args.comm_huber_delta,
-        comm_penalty_cap_per_user=args.comm_penalty_cap_per_user,
-        comm_penalty_cap_total=args.comm_penalty_cap_total,
-        comm_penalty_avg_over_k=args.comm_penalty_avg_over_k,
+        comm_penalty_clip_per_user=args.comm_penalty_cap_per_user,
+        comm_penalty_clip_total=args.comm_penalty_cap_total,
         action_smooth_coef=args.action_smooth_coef,
         user_move_range=args.user_move_range,
         reward_scale=args.reward_scale,
-        eta_clip_max=args.eta_clip_max,
-        comm_penalty_clip_max=args.comm_penalty_clip_max,
-        eav_penalty_clip_max=args.eav_penalty_clip_max,
     )
     
     # 获取状态和动作维度
@@ -332,6 +337,10 @@ def main(args=None, logger=None, id=None):
     print(f"Starting training for {num_steps} steps...")
     print(f"Random exploration for first {start_steps} steps")
 
+    # 泄露率统计变量
+    train_leakage_count = 0
+    train_total_users = 0
+
     while steps < num_steps:
         episode_reward = 0.
         episode_steps = 0
@@ -346,9 +355,22 @@ def main(args=None, logger=None, id=None):
             if start_steps > steps:
                 action = env.action_space.sample()
             else:
-                action = agent.sample_action(state, eval=False)
+                env_info = {
+                    'uav_x': env.uav_position[0],
+                    'uav_y': env.uav_position[1],
+                    'l_max': env.l_max,
+                    'x_min': env.X_min,
+                    'x_max': env.X_max,
+                    'y_min': env.Y_min,
+                    'y_max': env.Y_max,
+                }
+                action = agent.sample_action(state, eval=False, env_info=env_info)
             
             next_state, reward, done, truncated, info = env.step(action)
+
+            # 累计泄露率统计
+            train_leakage_count += info.get('leakage_count', 0)
+            train_total_users += info.get('total_users', 0)
 
             if steps % 200 == 0:
                 writer.add_scalar('reward_terms/eta_0', float(info.get('eta_0', 0.0)), steps)
@@ -364,6 +386,11 @@ def main(args=None, logger=None, id=None):
                 writer.add_scalar('reward_terms/eta_0_clipped', float(info.get('eta_0_clipped', 0.0)), steps)
                 writer.add_scalar('reward_terms/comm_penalty_clipped', float(info.get('comm_penalty_clipped', 0.0)), steps)
                 writer.add_scalar('reward_terms/eav_penalty_clipped', float(info.get('eav_penalty_clipped', 0.0)), steps)
+                
+                # 训练泄露率（每200步记录一次累计泄露率）
+                if train_total_users > 0:
+                    train_leakage_rate = train_leakage_count / train_total_users
+                    writer.add_scalar('security/train_leakage_rate', train_leakage_rate, steps)
 
             # mask计算
             mask = 0.0 if (done or truncated) else args.gamma
@@ -387,8 +414,9 @@ def main(args=None, logger=None, id=None):
                 print(f"\n{'='*60}")
                 print(f"Evaluation at step {steps}")
                 print(f"{'='*60}")
-                tmp_result = evaluate(eval_env, agent, steps, source_env=env)
+                tmp_result, eval_leakage_rate = evaluate(eval_env, agent, steps, source_env=env)
                 writer.add_scalar('reward/eval_mean', tmp_result, steps)
+                writer.add_scalar('security/eval_leakage_rate', eval_leakage_rate, steps)
                 
                 if tmp_result > best_result:
                     best_result = tmp_result

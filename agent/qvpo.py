@@ -112,14 +112,14 @@ class QVPO(object):
         if not self.aug:
             self.diffusion_memory.append(state, action)
 
-    def sample_action(self, state, eval=False):
+    def sample_action(self, state, eval=False, env_info=None):
         state = torch.FloatTensor(state.reshape(1, -1)).to(self.device)
 
         normal = False
         if not eval and torch.rand(1).item() <= self.epsilon:
             normal = True
 
-        action = self.actor(state, eval, q_func=self.critic, normal=normal).cpu().data.numpy().flatten()
+        action = self.actor(state, eval, q_func=self.critic, normal=normal, env_info=env_info).cpu().data.numpy().flatten()
         action = action.clip(-1, 1)
         action = action * self.action_scale + self.action_bias
         return action

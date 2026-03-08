@@ -135,7 +135,7 @@ class Diffusion(nn.Module):
         return x
 
     @torch.no_grad()
-    def sample(self, state, eval=False, q_func=None, normal=False):
+    def sample(self, state, eval=False, q_func=None, normal=False, env_info=None):
         if self.deterministic:
             self.noise_ratio = 0 if eval else self.max_noise_ratio
         else:
@@ -149,31 +149,65 @@ class Diffusion(nn.Module):
             return action
 
         if eval:
-            raw_batch_size = state.shape[0]
-            state = state.repeat(self.eval_sample, 1)
-            batch_size = state.shape[0]
-            shape = (batch_size, self.action_dim)
-            action = self.p_sample_loop(state, shape)
-            action.clamp_(-1., 1.)
-            q1, q2 = q_func(state, action)
-            q = torch.min(q1, q2)
-            action = action.view(self.eval_sample, raw_batch_size, -1).transpose(0,1)
-            q = q.view(self.eval_sample, raw_batch_size, -1).transpose(0,1)
-            action_idx = torch.argmax(q, dim=1, keepdim=True).repeat(1,1,self.action_dim)
-            return action.gather(dim=1, index=action_idx).view(raw_batch_size, -1)
+            sample_count = self.eval_sample
         else:
-            raw_batch_size = state.shape[0]
-            state = state.repeat(self.behavior_sample, 1)
-            batch_size = state.shape[0]
-            shape = (batch_size, self.action_dim)
-            action = self.p_sample_loop(state, shape)
-            action.clamp_(-1., 1.)
-            q1, q2 = q_func(state, action)
-            q = torch.min(q1, q2)
-            action = action.view(self.behavior_sample, raw_batch_size, -1).transpose(0,1)
-            q = q.view(self.behavior_sample, raw_batch_size, -1).transpose(0,1)
-            action_idx = torch.argmax(q, dim=1, keepdim=True).repeat(1,1,self.action_dim)
-            return action.gather(dim=1, index=action_idx).view(raw_batch_size, -1)
+            sample_count = self.behavior_sample
+            
+        raw_batch_size = state.shape[0]
+        state_rep = state.repeat(sample_count, 1)
+        batch_size = state_rep.shape[0]
+        shape = (batch_size, self.action_dim)
+        action_rep = self.p_sample_loop(state_rep, shape)
+        action_rep.clamp_(-1., 1.)
+        q1, q2 = q_func(state_rep, action_rep)
+        q = torch.min(q1, q2)
+        action_rep = action_rep.view(sample_count, raw_batch_size, -1).transpose(0,1)
+        q = q.view(sample_count, raw_batch_size, -1).transpose(0,1)
+        
+        # ========== Physics-Informed Masked Action Selection ==========
+        if env_info is not None and raw_batch_size == 1:
+            uav_x = env_info.get('uav_x', 0.0)
+            uav_y = env_info.get('uav_y', 0.0)
+            l_max = env_info.get('l_max', 100.0)
+            x_min = env_info.get('x_min', -400.0)
+            x_max = env_info.get('x_max', 400.0)
+            y_min = env_info.get('y_min', -400.0)
+            y_max = env_info.get('y_max', 400.0)
+            
+            actions_np = action_rep[0].cpu().numpy()  # (sample_count, 3)
+            q_np = q[0].cpu().numpy().flatten()  # (sample_count,)
+            
+            valid_mask = np.ones(sample_count, dtype=bool)
+            
+            for i in range(sample_count):
+                angle = actions_np[i, 0] * np.pi
+                distance = actions_np[i, 1] * l_max
+                
+                delta_x = distance * np.cos(angle)
+                delta_y = distance * np.sin(angle)
+                
+                new_x = uav_x + delta_x
+                new_y = uav_y + delta_y
+                
+                if new_x < x_min or new_x > x_max or new_y < y_min or new_y > y_max:
+                    valid_mask[i] = False
+            
+            if np.any(valid_mask):
+                valid_indices = np.where(valid_mask)[0]
+                valid_q = q_np[valid_indices]
+                best_valid_idx = valid_indices[np.argmax(valid_q)]
+                best_action = action_rep[0, best_valid_idx:best_valid_idx+1, :]
+            else:
+                # Fallback: 选择移动距离最小的动作
+                distances = np.abs(actions_np[:, 1])
+                fallback_idx = np.argmin(distances)
+                best_action = action_rep[0, fallback_idx:fallback_idx+1, :]
+            
+            return best_action.view(raw_batch_size, -1)
+        # ========== End of Physics-Informed Masking ==========
+        
+        action_idx = torch.argmax(q, dim=1, keepdim=True).repeat(1,1,self.action_dim)
+        return action_rep.gather(dim=1, index=action_idx).view(raw_batch_size, -1)
 
     # ------------------------------------------ training ------------------------------------------#
     @torch.no_grad()
@@ -245,6 +279,6 @@ class Diffusion(nn.Module):
         t = torch.randint(0, self.n_timesteps, (batch_size,), device=x.device).long()
         return self.p_losses(x, state, t, weights)
 
-    def forward(self, state, eval=False, q_func=None, normal=False):
-        return self.sample(state, eval, q_func, normal)
+    def forward(self, state, eval=False, q_func=None, normal=False, env_info=None):
+        return self.sample(state, eval, q_func, normal, env_info)
 
