@@ -14,9 +14,8 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
 
-# 🔥 修改：导入你为 SAC 准备的无归一化环境
-# 假设你的新环境文件叫 myenv2.py，类名依然是 UAVISACEnvironment
-from myenv2 import UAVISACEnvironment
+# 🔥 修改：导入 myenv3 环境
+from myenv3 import UAVISACEnvironment
 
 # ============================================================
 # Agent 端状态归一化 (替代环境内部的归一化)
@@ -100,55 +99,47 @@ def parse_args():
     parser.add_argument('--action_smooth_coef', type=float, default=0.8, help="action smoothness penalty coefficient")
     parser.add_argument('--user_move_range', type=float, default=20.0, help="user movement range per step")
 
-    # 窃听 (Eavesdropper) 相关
-    parser.add_argument('--eav_agg', type=str, default='logsumexp', choices=['max', 'top2', 'logsumexp'])
-    parser.add_argument('--eav_logsumexp_kappa', type=float, default=0.5)
+    # 窃听 (Eavesdropper) 相关 (适配myenv3)
     parser.add_argument('--eav_threshold', type=float, default=10.0)
-    parser.add_argument('--eav_penalty_coef', type=float, default=3.0)
-    parser.add_argument('--eav_penalty_cap', type=float, default=20.0)
+    parser.add_argument('--eav_penalty_coef', type=float, default=2.0)
+    parser.add_argument('--eav_penalty_clip_max', type=float, default=1000.0)
 
-    # 通信 (Communication) 相关
-    parser.add_argument('--comm_penalty', type=str, default='softplus', choices=['hinge', 'softplus', 'huber'])
+    # 通信 (Communication) 相关 (适配myenv3)
     parser.add_argument('--comm_threshold', type=float, default=10.0)
-    parser.add_argument('--comm_penalty_coef', type=float, default=1.5)
-    parser.add_argument('--comm_softplus_kappa', type=float, default=5.0)
-    parser.add_argument('--comm_huber_delta', type=float, default=1.0)
-    parser.add_argument('--comm_penalty_cap_per_user', type=float, default=15.0)
-    parser.add_argument('--comm_penalty_cap_total', type=float, default=30.0)
-    parser.add_argument('--comm_penalty_avg_over_k', type=lambda x: bool(strtobool(str(x))), default=True)
-
-    # 裁剪参数
-    parser.add_argument('--eta_clip_max', type=float, default=15.0)
-    parser.add_argument('--comm_penalty_clip_max', type=float, default=5.0)
-    parser.add_argument('--eav_penalty_clip_max', type=float, default=5.0)
+    parser.add_argument('--comm_penalty_coef', type=float, default=0.5)
+    parser.add_argument('--comm_softplus_kappa', type=float, default=2.0)
+    parser.add_argument('--comm_penalty_clip_per_user', type=float, default=20.0)
+    parser.add_argument('--comm_penalty_clip_total', type=float, default=50.0)
 
     args = parser.parse_args()
     return args
 
 def make_uav_env(args):
     """
-    初始化环境，传入所有物理参数
+    初始化环境，传入所有物理参数 (适配myenv3)
+    注意：SAC不启用StateNormalizer，由Agent端进行归一化
     """
     env = UAVISACEnvironment(
-        eav_agg=args.eav_agg,
-        eav_logsumexp_kappa=args.eav_logsumexp_kappa,
+        # 核心参数
+        normalize_state=False,  # SAC使用Agent端归一化，禁用环境内部归一化
+        normalize_reward=True,
+        
+        # 窃听相关
         eav_threshold=args.eav_threshold,
         eav_penalty_coef=args.eav_penalty_coef,
-        eav_penalty_cap=args.eav_penalty_cap,
-        comm_penalty_type=args.comm_penalty,
+        eav_penalty_clip_max=args.eav_penalty_clip_max,
+        
+        # 通信相关
         comm_threshold=args.comm_threshold,
         comm_penalty_coef=args.comm_penalty_coef,
         comm_softplus_kappa=args.comm_softplus_kappa,
-        comm_huber_delta=args.comm_huber_delta,
-        comm_penalty_cap_per_user=args.comm_penalty_cap_per_user,
-        comm_penalty_cap_total=args.comm_penalty_cap_total,
-        comm_penalty_avg_over_k=args.comm_penalty_avg_over_k,
+        comm_penalty_clip_per_user=args.comm_penalty_clip_per_user,
+        comm_penalty_clip_total=args.comm_penalty_clip_total,
+        
+        # 其他
         action_smooth_coef=args.action_smooth_coef,
         user_move_range=args.user_move_range,
         reward_scale=args.reward_scale,
-        eta_clip_max=args.eta_clip_max,
-        comm_penalty_clip_max=args.comm_penalty_clip_max,
-        eav_penalty_clip_max=args.eav_penalty_clip_max,
     )
     return env
 
@@ -219,7 +210,7 @@ if __name__ == "__main__":
     print(f"Using device: {device}")
 
     # 环境初始化
-    print("Initializing Environments (Using myenv2 without internal normalization)...")
+    print("Initializing Environments (Using myenv3 without internal normalization)...")
     env = make_uav_env(args)
     eval_env = make_uav_env(args)
 
@@ -288,23 +279,20 @@ if __name__ == "__main__":
         next_obs, reward, terminated, truncated, info = env.step(action)
         episode_steps += 1
         
-        # 🔥 对齐日志：每 200 步记录详细的 reward_terms
+        # 🔥 对齐日志：每 200 步记录详细的 reward_terms (适配myenv3)
         if global_step % 200 == 0:
             writer.add_scalar('reward_terms/eta_0', float(info.get('eta_0', 0.0)), global_step)
             writer.add_scalar('reward_terms/comm_penalty', float(info.get('comm_penalty', 0.0)), global_step)
-            writer.add_scalar('reward_terms/eav_penalty', float(info.get('eav_penalty', 0.0)), global_step)
-            writer.add_scalar('reward_terms/energy_penalty', float(info.get('energy_penalty', 0.0)), global_step)
-            writer.add_scalar('reward_terms/boundary_penalty', float(info.get('boundary_penalty', 0.0)), global_step)
-            writer.add_scalar('reward_terms/action_smooth_penalty', float(info.get('action_smooth_penalty', 0.0)), global_step)
+            writer.add_scalar('reward_terms/eav_penalty_raw', float(info.get('eav_penalty_raw', 0.0)), global_step)
+            writer.add_scalar('reward_terms/eav_penalty_weighted', float(info.get('eav_penalty_weighted', 0.0)), global_step)
             
             writer.add_scalar('reward_terms/reward_raw', float(info.get('reward_raw', 0.0)), global_step)
-            writer.add_scalar('reward_terms/reward_clip_1', float(info.get('reward_clip_1', reward)), global_step)
-            # 训练时使用的最终 reward
             writer.add_scalar('reward_terms/reward_final', float(info.get('reward_final', reward)), global_step)
+            writer.add_scalar('reward_terms/reward_final_unscaled', float(info.get('reward_final_unscaled', 0.0)), global_step)
             
-            writer.add_scalar('reward_terms/eta_0_clipped', float(info.get('eta_0_clipped', 0.0)), global_step)
-            writer.add_scalar('reward_terms/comm_penalty_clipped', float(info.get('comm_penalty_clipped', 0.0)), global_step)
-            writer.add_scalar('reward_terms/eav_penalty_clipped', float(info.get('eav_penalty_clipped', 0.0)), global_step)
+            # myenv3特有：感知泄漏统计
+            writer.add_scalar('reward_terms/leakage_count', float(info.get('leakage_count', 0)), global_step)
+            writer.add_scalar('reward_terms/total_users', float(info.get('total_users', 0)), global_step)
 
         # 3. Buffer 存储 (存 Raw Data)
         real_done = terminated 
