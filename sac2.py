@@ -253,6 +253,10 @@ if __name__ == "__main__":
     recent_rewards = deque(maxlen=100)
     ema_reward = None
     
+    # 泄露率统计（对齐main.py）
+    train_leakage_count = 0
+    train_total_users = 0
+    
     obs, _ = env.reset(seed=args.seed)
     # 初始状态更新到归一化器
     obs_rms.update(obs)
@@ -279,20 +283,42 @@ if __name__ == "__main__":
         next_obs, reward, terminated, truncated, info = env.step(action)
         episode_steps += 1
         
-        # 🔥 对齐日志：每 200 步记录详细的 reward_terms (适配myenv3)
+        # 累计泄露率统计（对齐main.py）
+        train_leakage_count += info.get('leakage_count', 0)
+        train_total_users += info.get('total_users', 0)
+        
+        # 🔥 完全对齐main.py的日志记录（每200步）
         if global_step % 200 == 0:
+            # 奖励项（对齐main.py）
             writer.add_scalar('reward_terms/eta_0', float(info.get('eta_0', 0.0)), global_step)
             writer.add_scalar('reward_terms/comm_penalty', float(info.get('comm_penalty', 0.0)), global_step)
-            writer.add_scalar('reward_terms/eav_penalty_raw', float(info.get('eav_penalty_raw', 0.0)), global_step)
-            writer.add_scalar('reward_terms/eav_penalty_weighted', float(info.get('eav_penalty_weighted', 0.0)), global_step)
-            
+            writer.add_scalar('reward_terms/eav_penalty', float(info.get('eav_penalty_weighted', 0.0)), global_step)  # 注意：使用加权值
+            writer.add_scalar('reward_terms/energy_penalty', float(info.get('energy_penalty', 0.0)), global_step)
+            writer.add_scalar('reward_terms/boundary_penalty', float(info.get('boundary_penalty', 0.0)), global_step)
+            writer.add_scalar('reward_terms/action_smooth_penalty', float(info.get('action_smooth_penalty', 0.0)), global_step)
             writer.add_scalar('reward_terms/reward_raw', float(info.get('reward_raw', 0.0)), global_step)
+            writer.add_scalar('reward_terms/reward_clip_1', float(info.get('reward_final', reward)), global_step)  # 对齐main.py的命名
             writer.add_scalar('reward_terms/reward_final', float(info.get('reward_final', reward)), global_step)
-            writer.add_scalar('reward_terms/reward_final_unscaled', float(info.get('reward_final_unscaled', 0.0)), global_step)
             
-            # myenv3特有：感知泄漏统计
-            writer.add_scalar('reward_terms/leakage_count', float(info.get('leakage_count', 0)), global_step)
-            writer.add_scalar('reward_terms/total_users', float(info.get('total_users', 0)), global_step)
+            # 裁剪值（myenv3中没有eta_0_clipped等，暂时跳过）
+            # writer.add_scalar('reward_terms/eta_0_clipped', float(info.get('eta_0_clipped', 0.0)), global_step)  # myenv3无此字段
+            # writer.add_scalar('reward_terms/comm_penalty_clipped', float(info.get('comm_penalty_clipped', 0.0)), global_step)  # myenv3无此字段
+            # writer.add_scalar('reward_terms/eav_penalty_clipped', float(info.get('eav_penalty_clipped', 0.0)), global_step)  # myenv3无此字段
+            
+            # 感知泄漏率相关指标（对齐main.py）
+            step_leakage_count = info.get('leakage_count', 0)
+            step_total_users = info.get('total_users', 0)
+            if step_total_users > 0:
+                step_leakage_rate = step_leakage_count / step_total_users
+                writer.add_scalar('security/step_leakage_rate', step_leakage_rate, global_step)
+            writer.add_scalar('security/step_leakage_count', float(step_leakage_count), global_step)
+            writer.add_scalar('security/eav_penalty_raw', float(info.get('eav_penalty_raw', 0.0)), global_step)
+            writer.add_scalar('security/eav_penalty_weighted', float(info.get('eav_penalty_weighted', 0.0)), global_step)
+            
+            # 训练泄露率（每200步记录一次累计泄露率）
+            if train_total_users > 0:
+                train_leakage_rate = train_leakage_count / train_total_users
+                writer.add_scalar('security/train_leakage_rate', train_leakage_rate, global_step)
 
         # 3. Buffer 存储 (存 Raw Data)
         real_done = terminated 
@@ -396,13 +422,18 @@ if __name__ == "__main__":
         # 🔥 评估逻辑 (完全对齐 main.py)
         # ============================================================
         if global_step > 0 and global_step % args.eval_frequency == 0:
-            print(f"Evaluating at step {global_step}...")
+            print(f"Evaluating at step {global_step}")
+            print(f"{'='*60}")
             
             # SAC评估时不需要同步Env内部的归一化器(因为Env是Raw的)
             # 而是直接使用 obs_rms 对 eval_env 的输出进行归一化
             
             actor.eval()
             returns = np.zeros((args.eval_episodes,), dtype=np.float32)
+            
+            # 评估泄露率统计（对齐main.py）
+            eval_leakage_count = 0
+            eval_total_users = 0
             
             for i in range(args.eval_episodes):
                 eval_obs, _ = eval_env.reset()
@@ -420,19 +451,35 @@ if __name__ == "__main__":
                         )
                         eval_action = eval_action_mean.cpu().numpy().flatten()
                     
-                    eval_next_obs, eval_r, eval_term, eval_trunc, _ = eval_env.step(eval_action)
+                    eval_next_obs, eval_r, eval_term, eval_trunc, eval_info = eval_env.step(eval_action)
                     eval_episode_ret += eval_r
                     eval_done = eval_term or eval_trunc
                     eval_obs = eval_next_obs
+                    
+                    # 累计泄露率统计（对齐main.py）
+                    eval_leakage_count += eval_info.get('leakage_count', 0)
+                    eval_total_users += eval_info.get('total_users', 0)
                 
                 returns[i] = eval_episode_ret
             
             mean_return = np.mean(returns)
             std_return = np.std(returns)
             
-            # 🔥 记录测试时的 reward (与 main.py 一致)
+            # 计算评估泄露率（对齐main.py）
+            eval_leakage_rate = eval_leakage_count / eval_total_users if eval_total_users > 0 else 0.0
+            
+            # 🔥 记录测试时的指标 (与 main.py 完全一致)
             writer.add_scalar('reward/eval_mean', mean_return, global_step)
-            print(f"Eval result: reward: {mean_return:.1f}, std: {std_return:.1f}")
+            writer.add_scalar('security/eval_leakage_rate', eval_leakage_rate, global_step)
+            
+            # 打印格式对齐main.py
+            print('-' * 60)
+            print(f'Num steps: {global_step:<5}  '
+                  f'reward: {mean_return:<5.1f}  '
+                  f'std: {std_return:<5.1f}  '
+                  f'leakage_rate: {eval_leakage_rate:.2%}')
+            print(returns)
+            print('-' * 60)
             
             actor.train()
 
