@@ -1,13 +1,6 @@
-# 3/1/22:15\
-# 修复reset时传入相同种子的问题
-# 参数同run1
-
-
 # 3/10 0:45 适配myenv3环境
 # SAC基线实验，使用Agent端归一化（不启用myenv3的StateNormalizer）
 
-source ~/anaconda3/etc/profile.d/conda.sh
-conda activate qvpo
 
 python sac2.py \
     --exp-name "sac_myenv3" \
