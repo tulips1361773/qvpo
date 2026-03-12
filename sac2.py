@@ -206,7 +206,11 @@ if __name__ == "__main__":
     torch.manual_seed(args.seed)
     torch.backends.cudnn.deterministic = args.torch_deterministic
 
-    device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
+    # 设备设置 - 支持指定GPU编号
+    if args.cuda.startswith("cuda"):
+        device = torch.device(args.cuda if torch.cuda.is_available() else "cpu")
+    else:
+        device = torch.device("cpu")
     print(f"Using device: {device}")
 
     # 环境初始化
@@ -292,7 +296,7 @@ if __name__ == "__main__":
             # 奖励项（对齐main.py）
             writer.add_scalar('reward_terms/eta_0', float(info.get('eta_0', 0.0)), global_step)
             writer.add_scalar('reward_terms/comm_penalty', float(info.get('comm_penalty', 0.0)), global_step)
-            writer.add_scalar('reward_terms/eav_penalty', float(info.get('eav_penalty_weighted', 0.0)), global_step)  # 注意：使用加权值
+            writer.add_scalar('reward_terms/eav_penalty', float(info.get('eav_penalty_raw', 0.0)), global_step)  # 对齐main.py使用原始值
             writer.add_scalar('reward_terms/energy_penalty', float(info.get('energy_penalty', 0.0)), global_step)
             writer.add_scalar('reward_terms/boundary_penalty', float(info.get('boundary_penalty', 0.0)), global_step)
             writer.add_scalar('reward_terms/action_smooth_penalty', float(info.get('action_smooth_penalty', 0.0)), global_step)
@@ -300,10 +304,10 @@ if __name__ == "__main__":
             writer.add_scalar('reward_terms/reward_clip_1', float(info.get('reward_final', reward)), global_step)  # 对齐main.py的命名
             writer.add_scalar('reward_terms/reward_final', float(info.get('reward_final', reward)), global_step)
             
-            # 裁剪值（myenv3中没有eta_0_clipped等，暂时跳过）
-            # writer.add_scalar('reward_terms/eta_0_clipped', float(info.get('eta_0_clipped', 0.0)), global_step)  # myenv3无此字段
-            # writer.add_scalar('reward_terms/comm_penalty_clipped', float(info.get('comm_penalty_clipped', 0.0)), global_step)  # myenv3无此字段
-            # writer.add_scalar('reward_terms/eav_penalty_clipped', float(info.get('eav_penalty_clipped', 0.0)), global_step)  # myenv3无此字段
+            # 裁剪值（使用环境提供的真实值）
+            writer.add_scalar('reward_terms/eta_0_clipped', float(info.get('eta_0_clipped', 0.0)), global_step)
+            writer.add_scalar('reward_terms/comm_penalty_clipped', float(info.get('comm_penalty_clipped', 0.0)), global_step)
+            writer.add_scalar('reward_terms/eav_penalty_clipped', float(info.get('eav_penalty_clipped', 0.0)), global_step)
             
             # 感知泄漏率相关指标（对齐main.py）
             step_leakage_count = info.get('leakage_count', 0)
@@ -417,6 +421,14 @@ if __name__ == "__main__":
                     target_param.data.copy_(args.tau * param.data + (1 - args.tau) * target_param.data)
                 for param, target_param in zip(qf2.parameters(), qf2_target.parameters()):
                     target_param.data.copy_(args.tau * param.data + (1 - args.tau) * target_param.data)
+
+            # 🔥 记录SAC算法特定的指标（每1000步记录一次，避免过多日志）
+            if global_step % 1000 == 0:
+                writer.add_scalar('losses/qf_loss', qf_loss.item(), global_step)
+                writer.add_scalar('losses/actor_loss', actor_loss.item(), global_step)
+                if args.autotune:
+                    writer.add_scalar('alpha/value', alpha, global_step)
+                    writer.add_scalar('losses/alpha_loss', alpha_loss.item(), global_step)
 
         # ============================================================
         # 🔥 评估逻辑 (完全对齐 main.py)

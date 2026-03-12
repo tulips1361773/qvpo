@@ -83,12 +83,12 @@ class UAVISACEnvironment(gym.Env):
                  
                  # 通信参数 (优先级较低)
                  comm_threshold=10.0,
-                 comm_penalty_coef=0.5,
-                 comm_softplus_kappa: float = 2.0, # 稍微增加陡峭度
-                 comm_penalty_clip_per_user=20.0,
-                 comm_penalty_clip_total=50.0,
+                 comm_penalty_coef=1.5,
+                 comm_softplus_kappa: float = 5.0, # 稍微增加陡峭度
+                 comm_penalty_clip_per_user=15.0,
+                 comm_penalty_clip_total=30.0,
 
-                 action_smooth_coef: float = 0.8, 
+                 action_smooth_coef: float = 0.1, 
                  user_move_range: float = 20.0,
                  reward_scale: float = 0.1,       
                  ): 
@@ -302,9 +302,13 @@ class UAVISACEnvironment(gym.Env):
 
         info = {
             'eta_0': float(eta_0),
+            'eta_0_clipped': float(min(eta_0, 30.0)),  # 添加裁剪后的感知SNR
             'eav_penalty_raw': float(eav_penalty_raw),
             'eav_penalty_weighted': float(R_eav),
+            'eav_penalty': float(eav_penalty_raw),  # 对齐main.py的命名
+            'eav_penalty_clipped': float(eav_penalty_raw),  # myenv3中没有硬裁剪
             'comm_penalty': float(avg_comm_penalty),
+            'comm_penalty_clipped': float(avg_comm_penalty_clipped),  # 添加裁剪后的通信惩罚
             'reward_raw': float(reward),
             'leakage_count': leakage_count,
             'total_users': total_users,
