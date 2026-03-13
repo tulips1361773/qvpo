@@ -1,3 +1,5 @@
+# 3/12 11:08
+# 参数和sucure.sh对齐
 python sac2.py \
     --exp-name "sac_myenv3_improved" \
     --seed 42 \

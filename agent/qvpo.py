@@ -47,7 +47,6 @@ class QVPO(object):
                                    beta_schedule=args.beta_schedule, n_timesteps=args.n_timesteps, behavior_sample=args.behavior_sample,
                                    eval_sample=args.eval_sample, deterministic=args.deterministic).to(device)
 
-            # 🔥🔥🔥 必须保留的参数赋值（之前报错就是因为这里没赋值）
             self.running_q_std = 1.0
             self.running_q_mean = 0.0
             self.beta = args.beta
@@ -57,7 +56,7 @@ class QVPO(object):
             self.q_neg = args.q_neg
 
             self.weighted = args.weighted
-            self.aug = args.aug  # <--- 就是这行救了命
+            self.aug = args.aug  
             self.train_sample = args.train_sample
 
             self.q_transform = args.q_transform
