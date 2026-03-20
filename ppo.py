@@ -15,7 +15,7 @@ from torch.distributions.normal import Normal
 from torch.utils.tensorboard import SummaryWriter
 
 # 导入自定义环境
-from myenv import UAVISACEnvironment
+from myenv3 import UAVISACEnvironment
 
 def parse_args():
     parser = argparse.ArgumentParser(description='PPO Agent for UAV-ISAC')
@@ -65,28 +65,22 @@ def parse_args():
     parser.add_argument('--normalize_state', type=lambda x: bool(strtobool(x)), default=True,
                         help="enable state normalization (default: True)")
     
-    parser.add_argument('--eav_agg', type=str, default='logsumexp', choices=['max', 'top2', 'logsumexp'])
-    parser.add_argument('--eav_logsumexp_kappa', type=float, default=0.5)
+    # 窃听相关参数（与secure.sh对齐）
     parser.add_argument('--eav_threshold', type=float, default=10.0)
-    parser.add_argument('--eav_penalty_coef', type=float, default=3.0)
-    parser.add_argument('--eav_penalty_cap', type=float, default=20.0)
+    parser.add_argument('--eav_penalty_coef', type=float, default=5.0)
+    parser.add_argument('--eav_penalty_clip_max', type=float, default=200.0)
 
-    parser.add_argument('--comm_penalty', type=str, default='softplus', choices=['hinge', 'softplus', 'huber'])
+    # 通信相关参数（与secure.sh对齐）
     parser.add_argument('--comm_threshold', type=float, default=10.0)
     parser.add_argument('--comm_penalty_coef', type=float, default=1.5)
     parser.add_argument('--comm_softplus_kappa', type=float, default=5.0)
-    parser.add_argument('--comm_huber_delta', type=float, default=1.0)
     parser.add_argument('--comm_penalty_cap_per_user', type=float, default=15.0)
     parser.add_argument('--comm_penalty_cap_total', type=float, default=30.0)
-    parser.add_argument('--comm_penalty_avg_over_k', type=lambda x: bool(strtobool(x)), default=True)
     
-    parser.add_argument('--action_smooth_coef', type=float, default=0.8)
+    # 其他参数（与secure.sh对齐）
+    parser.add_argument('--action_smooth_coef', type=float, default=0.1)
     parser.add_argument('--user_move_range', type=float, default=20.0)
     parser.add_argument('--reward_scale', type=float, default=0.1)
-    
-    parser.add_argument('--eta_clip_max', type=float, default=15.0)
-    parser.add_argument('--comm_penalty_clip_max', type=float, default=5.0)
-    parser.add_argument('--eav_penalty_clip_max', type=float, default=5.0)
 
     args = parser.parse_args()
     args.batch_size = int(args.num_steps) 
@@ -145,7 +139,7 @@ class Agent(nn.Module):
         return self.actor_mean(x)
 
 def evaluate(env, agent, device, source_env=None):
-    """PPO 评估函数"""
+    """PPO 评估函数（与main.py对齐）"""
     # 1. 强同步状态归一化统计量
     if source_env is not None and hasattr(source_env, 'state_normalizer') and hasattr(env, 'state_normalizer'):
         env.state_normalizer.mean = source_env.state_normalizer.mean.copy()
@@ -157,6 +151,10 @@ def evaluate(env, agent, device, source_env=None):
     
     episodes = 10
     returns = np.zeros((episodes,), dtype=np.float32)
+    
+    # 评估泄露率统计（与main.py对齐）
+    eval_leakage_count = 0
+    eval_total_users = 0
     
     for i in range(episodes):
         state, _ = env.reset()
@@ -173,9 +171,13 @@ def evaluate(env, agent, device, source_env=None):
             # 评估时也进行截断 (保持一致)
             action = np.clip(action, -1.0, 1.0)
             
-            next_state, reward, done, truncated, _ = env.step(action)
+            next_state, reward, done, truncated, info = env.step(action)
             episode_reward += reward
             state = next_state
+            
+            # 累计泄露率统计
+            eval_leakage_count += info.get('leakage_count', 0)
+            eval_total_users += info.get('total_users', 0)
         
         returns[i] = episode_reward
     
@@ -183,7 +185,20 @@ def evaluate(env, agent, device, source_env=None):
         env.state_normalizer.set_training(True)
     
     mean_return = np.mean(returns)
-    return mean_return
+    std_return = np.std(returns)
+    
+    # 计算评估泄露率
+    eval_leakage_rate = eval_leakage_count / eval_total_users if eval_total_users > 0 else 0.0
+    
+    # 打印格式与main.py对齐
+    print('-' * 60)
+    print(f'reward: {mean_return:<5.1f}  '
+          f'std: {std_return:<5.1f}  '
+          f'leakage_rate: {eval_leakage_rate:.2%}')
+    print(returns)
+    print('-' * 60)
+    
+    return mean_return, eval_leakage_rate
 
 def main():
     args = parse_args()
@@ -211,28 +226,20 @@ def main():
     else:
         device = torch.device("cpu")
 
-    # 环境参数
+    # 环境参数（与myenv3接口对齐）
     env_kwargs = {
         'normalize_state': args.normalize_state,
-        'eav_agg': args.eav_agg,
-        'eav_logsumexp_kappa': args.eav_logsumexp_kappa,
         'eav_threshold': args.eav_threshold,
         'eav_penalty_coef': args.eav_penalty_coef,
-        'eav_penalty_cap': args.eav_penalty_cap,
-        'comm_penalty_type': args.comm_penalty,
+        'eav_penalty_clip_max': args.eav_penalty_clip_max,
         'comm_threshold': args.comm_threshold,
         'comm_penalty_coef': args.comm_penalty_coef,
         'comm_softplus_kappa': args.comm_softplus_kappa,
-        'comm_huber_delta': args.comm_huber_delta,
-        'comm_penalty_cap_per_user': args.comm_penalty_cap_per_user,
-        'comm_penalty_cap_total': args.comm_penalty_cap_total,
-        'comm_penalty_avg_over_k': args.comm_penalty_avg_over_k,
+        'comm_penalty_clip_per_user': args.comm_penalty_cap_per_user,
+        'comm_penalty_clip_total': args.comm_penalty_cap_total,
         'action_smooth_coef': args.action_smooth_coef,
         'user_move_range': args.user_move_range,
         'reward_scale': args.reward_scale,
-        'eta_clip_max': args.eta_clip_max,
-        'comm_penalty_clip_max': args.comm_penalty_clip_max,
-        'eav_penalty_clip_max': args.eav_penalty_clip_max,
     }
 
     env = UAVISACEnvironment(**env_kwargs)
@@ -258,13 +265,16 @@ def main():
     
     episode_rewards = deque(maxlen=100)
     current_episode_reward = 0
+    ema_reward = None  # 与main.py对齐
+    
+    # 训练泄露率统计（与main.py对齐）
+    train_leakage_count = 0
+    train_total_users = 0
     
     # Eval logic
     last_eval_step = 0
     eval_interval = 10000 
     best_eval_return = -float('inf')
-
-    info_buffer = {k: [] for k in ['eta_0', 'comm_penalty', 'eav_penalty', 'reward_raw', 'reward_final']}
     num_updates = args.total_timesteps // args.num_steps
 
     for update in range(1, num_updates + 1):
@@ -300,23 +310,53 @@ def main():
             next_done = torch.tensor(float(done)).to(device)
 
             current_episode_reward += reward
-
-            for k in info_buffer.keys():
-                if k in info: info_buffer[k].append(info[k])
+            
+            # 累计训练泄露率
+            train_leakage_count += info.get('leakage_count', 0)
+            train_total_users += info.get('total_users', 0)
+            
+            # 每200步记录详细指标（与main.py对齐）
+            if global_step % 200 == 0:
+                writer.add_scalar('reward_terms/eta_0', float(info.get('eta_0', 0.0)), global_step)
+                writer.add_scalar('reward_terms/eta_0_clipped', float(info.get('eta_0_clipped', 0.0)), global_step)
+                writer.add_scalar('reward_terms/comm_penalty', float(info.get('comm_penalty', 0.0)), global_step)
+                writer.add_scalar('reward_terms/comm_penalty_clipped', float(info.get('comm_penalty_clipped', 0.0)), global_step)
+                writer.add_scalar('reward_terms/eav_penalty', float(info.get('eav_penalty', 0.0)), global_step)
+                writer.add_scalar('reward_terms/eav_penalty_clipped', float(info.get('eav_penalty_clipped', 0.0)), global_step)
+                writer.add_scalar('reward_terms/energy_penalty', float(info.get('energy_penalty', 0.0)), global_step)
+                writer.add_scalar('reward_terms/boundary_penalty', float(info.get('boundary_penalty', 0.0)), global_step)
+                writer.add_scalar('reward_terms/action_smooth_penalty', float(info.get('action_smooth_penalty', 0.0)), global_step)
+                writer.add_scalar('reward_terms/reward_raw', float(info.get('reward_raw', 0.0)), global_step)
+                writer.add_scalar('reward_terms/reward_clip_1', float(info.get('reward_clip_1', reward)), global_step)
+                writer.add_scalar('reward_terms/reward_final', float(info.get('reward_final', reward)), global_step)
+                
+                # 感知泄漏率相关指标
+                step_leakage_count = info.get('leakage_count', 0)
+                step_total_users = info.get('total_users', 0)
+                if step_total_users > 0:
+                    step_leakage_rate = step_leakage_count / step_total_users
+                    writer.add_scalar('security/step_leakage_rate', step_leakage_rate, global_step)
+                writer.add_scalar('security/step_leakage_count', float(step_leakage_count), global_step)
+                writer.add_scalar('security/eav_penalty_raw', float(info.get('eav_penalty_raw', 0.0)), global_step)
+                writer.add_scalar('security/eav_penalty_weighted', float(info.get('eav_penalty_weighted', 0.0)), global_step)
+                
+                # 训练泄露率（每200步记录一次累计泄露率）
+                if train_total_users > 0:
+                    train_leakage_rate = train_leakage_count / train_total_users
+                    writer.add_scalar('security/train_leakage_rate', train_leakage_rate, global_step)
 
             if done:
                 episode_rewards.append(current_episode_reward)
+                ema_reward = current_episode_reward if ema_reward is None else (0.95 * ema_reward + 0.05 * current_episode_reward)
+                
                 writer.add_scalar("reward/train", current_episode_reward, global_step)
                 writer.add_scalar("reward/train_ma100", np.mean(episode_rewards), global_step)
+                writer.add_scalar("reward/train_ema", float(ema_reward), global_step)
+                
                 current_episode_reward = 0
                 next_obs, _ = env.reset(seed=args.seed + global_step)
                 next_obs = torch.Tensor(next_obs).to(device)
                 next_done = torch.zeros(1).to(device)
-
-        # Log metrics
-        for k, v in info_buffer.items():
-            if v: writer.add_scalar(f"reward_terms/{k}", np.mean(v), global_step)
-        for k in info_buffer.keys(): info_buffer[k] = []
 
         # --- 2. GAE Calculation ---
         with torch.no_grad():
@@ -418,11 +458,12 @@ def main():
             print(f"\n[{datetime.datetime.now().strftime('%H:%M:%S')}] Step {global_step}: Evaluating...")
             
             # 评估
-            eval_return = evaluate(eval_env, agent, device, source_env=env)
+            eval_return, eval_leakage_rate = evaluate(eval_env, agent, device, source_env=env)
             
-            # 记录 Eval Reward
+            # 记录 Eval Reward 和泄露率（与main.py对齐）
             writer.add_scalar("reward/eval_mean", eval_return, global_step)
-            print(f"Eval Reward: {eval_return:.2f} (Best: {best_eval_return:.2f})")
+            writer.add_scalar("security/eval_leakage_rate", eval_leakage_rate, global_step)
+            print(f"Eval Reward: {eval_return:.2f} (Best: {best_eval_return:.2f})  Leakage: {eval_leakage_rate:.2%}")
 
             # 保存最优模型
             if eval_return > best_eval_return:
