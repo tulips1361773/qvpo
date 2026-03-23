@@ -1,6 +1,7 @@
-# 3/23 16:32
+# 3/23 18:32
 # eav_penalty_coef 5     --chosen 2  batchsize 256
 # 降低critic rl
+# 5被暂停了，9使用5的模型，重新自由探索之后继续训练
 python main.py \
   --env_name Env \
   --seed 99 \

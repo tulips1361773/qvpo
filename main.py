@@ -1,6 +1,7 @@
 import argparse
 import copy
 from collections import deque
+import time
 
 import numpy as np
 import torch
@@ -16,6 +17,8 @@ import datetime
 
 # 修改1: 导入自定义环境
 from myenv3 import UAVISACEnvironment
+# CSV logging utility
+from csv_logger import CSVExperimentLogger, create_scenario_name
 
 
 def _str2bool(v):
@@ -185,8 +188,8 @@ def readParser():
     return parser.parse_args()
 
 
-def evaluate(env, agent, steps, source_env=None):
-    """评估函数"""
+def evaluate(env, agent, steps, source_env=None, episodes=10):
+    """评估函数 - 返回统一的评估结果字典"""
     if source_env is not None and hasattr(source_env, 'state_normalizer') and hasattr(env, 'state_normalizer'):
         env.state_normalizer.mean = source_env.state_normalizer.mean.copy()
         env.state_normalizer.var = source_env.state_normalizer.var.copy()
@@ -195,18 +198,27 @@ def evaluate(env, agent, steps, source_env=None):
     if hasattr(env, 'state_normalizer'):
         env.state_normalizer.set_training(False)
     
-    episodes = 10
     returns = np.zeros((episodes,), dtype=np.float32)
     
     # 评估泄露率统计
     eval_leakage_count = 0
     eval_total_users = 0
     
+    # SNR统计 - 收集每个episode的平均值
+    legal_snr_db_list = []  # 每个episode的合法接收器SNR平均值
+    eav_snr_max_db_list = []  # 每个episode的最大窃听SNR平均值
+    eav_snr_avg_db_list = []  # 每个episode的平均窃听SNR平均值
+    
     for i in range(episodes):
         state, _ = env.reset()
         episode_reward = 0.
         done = False
         truncated = False
+        
+        # 单个episode内的SNR收集
+        ep_legal_snr_list = []
+        ep_eav_snr_max_list = []
+        ep_eav_snr_avg_list = []
         
         while not (done or truncated):
             env_info = {
@@ -226,8 +238,37 @@ def evaluate(env, agent, steps, source_env=None):
             # 累计泄露率统计
             eval_leakage_count += info.get('leakage_count', 0)
             eval_total_users += info.get('total_users', 0)
+            
+            # 收集SNR信息（从info中获取）
+            # eta_0 是合法接收器的感知SNR
+            legal_snr = info.get('eta_0', np.nan)
+            if not np.isnan(legal_snr):
+                ep_legal_snr_list.append(legal_snr)
+            
+            # 收集窃听者SNR列表
+            eav_snr_list = info.get('eavesdropper_snr_list', [])
+            if len(eav_snr_list) > 0:
+                ep_eav_snr_max_list.append(max(eav_snr_list))
+                ep_eav_snr_avg_list.append(np.mean(eav_snr_list))
         
         returns[i] = episode_reward
+        
+        # 计算该episode的SNR统计
+        if len(ep_legal_snr_list) > 0:
+            legal_snr_db_list.append(np.mean(ep_legal_snr_list))
+        else:
+            legal_snr_db_list.append(np.nan)
+        
+        # 计算窃听者SNR统计
+        if len(ep_eav_snr_max_list) > 0:
+            eav_snr_max_db_list.append(np.mean(ep_eav_snr_max_list))
+        else:
+            eav_snr_max_db_list.append(np.nan)
+        
+        if len(ep_eav_snr_avg_list) > 0:
+            eav_snr_avg_db_list.append(np.mean(ep_eav_snr_avg_list))
+        else:
+            eav_snr_avg_db_list.append(np.nan)
     
     # ✅ 新增：恢复训练模式
     if hasattr(env, 'state_normalizer'):
@@ -239,6 +280,18 @@ def evaluate(env, agent, steps, source_env=None):
     # 计算评估泄露率
     eval_leakage_rate = eval_leakage_count / eval_total_users if eval_total_users > 0 else 0.0
     
+    # 计算SNR统计
+    legal_snr_db_mean = np.nanmean(legal_snr_db_list) if len(legal_snr_db_list) > 0 else np.nan
+    legal_snr_db_std = np.nanstd(legal_snr_db_list) if len(legal_snr_db_list) > 0 else np.nan
+    eav_snr_max_db_mean = np.nanmean(eav_snr_max_db_list) if len(eav_snr_max_db_list) > 0 else np.nan
+    eav_snr_avg_db_mean = np.nanmean(eav_snr_avg_db_list) if len(eav_snr_avg_db_list) > 0 else np.nan
+    
+    # 计算SNR gap
+    if not np.isnan(legal_snr_db_mean) and not np.isnan(eav_snr_max_db_mean):
+        snr_gap_db_mean = legal_snr_db_mean - eav_snr_max_db_mean
+    else:
+        snr_gap_db_mean = np.nan
+    
     print('-' * 60)
     print(f'Num steps: {steps:<5}  '
           f'reward: {mean_return:<5.1f}  '
@@ -246,7 +299,21 @@ def evaluate(env, agent, steps, source_env=None):
           f'leakage_rate: {eval_leakage_rate:.2%}')
     print(returns)
     print('-' * 60)
-    return mean_return, eval_leakage_rate
+    
+    # 返回统一的评估结果字典
+    eval_results = {
+        'mean_return': float(mean_return),
+        'std_return': float(std_return),
+        'eval_leakage_rate': float(eval_leakage_rate),
+        'legal_snr_db_mean': float(legal_snr_db_mean),
+        'legal_snr_db_std': float(legal_snr_db_std),
+        'eav_snr_max_db_mean': float(eav_snr_max_db_mean),
+        'eav_snr_avg_db_mean': float(eav_snr_avg_db_mean),
+        'snr_gap_db_mean': float(snr_gap_db_mean),
+        'eval_episode_count': episodes,
+    }
+    
+    return eval_results
 
 
 def main(args=None, logger=None, id=None):
@@ -260,6 +327,22 @@ def main(args=None, logger=None, id=None):
     if id is not None:
         log_dir = os.path.join(log_dir, f'run_id={id}')
     writer = SummaryWriter(log_dir)
+    
+    # CSV logging initialization
+    csv_dir = os.path.join(log_dir, 'csv_logs')
+    scenario_name = create_scenario_name(args)
+    run_id = id if id is not None else datetime.datetime.now().strftime("%y%m%d_%H%M%S")
+    csv_logger = CSVExperimentLogger(
+        run_id=run_id,
+        algorithm='QVPO',
+        seed=args.seed,
+        scenario_name=scenario_name,
+        eval_interval=10000,  # Will be set below
+        csv_dir=csv_dir
+    )
+    
+    # Training start time for CSV logging
+    training_start_time = time.time()
 
     # 🔥🔥🔥 关键修改：直接实例化环境，传入归一化参数
     print("Initializing UAV-ISAC Environment...")
@@ -333,6 +416,7 @@ def main(args=None, logger=None, id=None):
     steps = 0
     episodes = 0
     best_result = -float('inf')
+    best_step = 0  # Track step where best result was achieved
 
     print(f"Starting training for {num_steps} steps...")
     print(f"Random exploration for first {start_steps} steps")
@@ -424,12 +508,28 @@ def main(args=None, logger=None, id=None):
                 print(f"\n{'='*60}")
                 print(f"Evaluation at step {steps}")
                 print(f"{'='*60}")
-                tmp_result, eval_leakage_rate = evaluate(eval_env, agent, steps, source_env=env)
-                writer.add_scalar('reward/eval_mean', tmp_result, steps)
-                writer.add_scalar('security/eval_leakage_rate', eval_leakage_rate, steps)
+                eval_results = evaluate(eval_env, agent, steps, source_env=env, episodes=10)
                 
-                if tmp_result > best_result:
-                    best_result = tmp_result
+                # TensorBoard logging (保持原有逻辑)
+                writer.add_scalar('reward/eval_mean', eval_results['mean_return'], steps)
+                writer.add_scalar('security/eval_leakage_rate', eval_results['eval_leakage_rate'], steps)
+                
+                # CSV logging for training metrics
+                time_elapsed = time.time() - training_start_time
+                train_reward_current = episode_reward if 'episode_reward' in locals() else np.nan
+                train_reward_ma = float(np.mean(recent_rewards)) if len(recent_rewards) > 0 else np.nan
+                
+                csv_logger.log_training_metrics(
+                    eval_results=eval_results,
+                    step=steps,
+                    time_elapsed_sec=time_elapsed,
+                    train_reward=train_reward_current,
+                    train_reward_ma100=train_reward_ma
+                )
+                
+                if eval_results['mean_return'] > best_result:
+                    best_result = eval_results['mean_return']
+                    best_step = steps
                     print(f"New best result: {best_result:.2f}! Saving model...")
                     agent.save_model(os.path.join('./results', prefix + '_' + name), id=id)
 
@@ -455,11 +555,30 @@ def main(args=None, logger=None, id=None):
             for i in range(episode_steps):
                 logger.add(epoch=steps-episode_steps+i, reward=episode_reward)
 
-    # 训练结束
+    # 训练结束 - 执行最终评估
     print(f"\n{'='*60}")
-    print(f"Training completed!")
+    print(f"Training completed! Performing final evaluation...")
+    print(f"{'='*60}")
+    
+    final_eval_results = evaluate(eval_env, agent, steps, source_env=env, episodes=10)
+    training_total_time = time.time() - training_start_time
+    
+    # CSV logging for final comparison
+    csv_logger.log_final_comparison(
+        final_eval_results=final_eval_results,
+        total_train_steps=steps,
+        best_eval_reward=best_result,
+        best_step=best_step,
+        training_time_sec=training_total_time
+    )
+    
     print(f"Total episodes: {episodes}")
-    print(f"Best evaluation result: {best_result:.2f}")
+    print(f"Total steps: {steps}")
+    print(f"Best evaluation result: {best_result:.2f} at step {best_step}")
+    print(f"Final evaluation result: {final_eval_results['mean_return']:.2f}")
+    print(f"Final leakage rate: {final_eval_results['eval_leakage_rate']:.2%}")
+    print(f"Training time: {training_total_time:.2f} seconds")
+    print(f"CSV logs saved to: {csv_dir}")
     print(f"{'='*60}")
     
     # 关闭环境和writer
@@ -479,6 +598,13 @@ if __name__ == "__main__":
     keys = ("epoch", "reward")
     times = args.times
     id = datetime.datetime.now().strftime("%y_%m_%d_%H_%M_%S")
+    
+    print(f"\n{'#'*60}")
+    print(f"# QVPO Training Configuration")
+    print(f"# Seed: {args.seed}")
+    print(f"# Total steps: {args.num_steps}")
+    print(f"# Run ID: {id}")
+    print(f"{'#'*60}\n")
     
     # 创建结果目录
     result_dir = os.path.join('./results', prefix + '_' + name)

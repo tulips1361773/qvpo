@@ -312,6 +312,7 @@ class UAVISACEnvironment(gym.Env):
             'reward_raw': float(reward),
             'leakage_count': leakage_count,
             'total_users': total_users,
+            'eavesdropper_snr_list': eavesdropper_snr_list,  # 窃听者SNR列表 (dB)
         }
         return reward, info
 

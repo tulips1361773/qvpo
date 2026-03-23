@@ -1,14 +1,14 @@
-# 3/20 22:26
-# eav_penalty_coef 5     --chosen 2 \  同实验3
-#     256  与实验3对比
+# 3/23 22:42
+# eav_penalty_coef 5     --chosen 2   256  
+# 与实验4对比 :训练后期把tau改为0.002
 python main.py \
   --env_name Env \
   --seed 42 \
-  --num_steps 250000 \
+  --num_steps 150000 \
   --batch_size 256 \
   --load_id 26_03_20_22_25_59_0 \
   --gamma 0.99 \
-  --tau 0.005 \
+  --tau 0.002 \
   --diffusion_lr 0.0001 \
   --critic_lr 0.0004 \
   --n_timesteps 20 \
@@ -39,4 +39,4 @@ python main.py \
   --comm_penalty_cap_per_user 15.0 \
   --comm_penalty_cap_total 30.0 \
   --start_steps 10000 \
-  --cuda cuda:2
+  --cuda cuda:0

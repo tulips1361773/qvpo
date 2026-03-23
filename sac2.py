@@ -16,6 +16,8 @@ from torch.utils.tensorboard import SummaryWriter
 
 # 🔥 修改：导入 myenv3 环境
 from myenv3 import UAVISACEnvironment
+# CSV logging utility
+from csv_logger import CSVExperimentLogger, create_scenario_name
 
 # ============================================================
 # Agent 端状态归一化 (替代环境内部的归一化)
@@ -194,12 +196,139 @@ class Actor(nn.Module):
         mean = torch.tanh(mean)
         return action, log_prob, mean
 
+def evaluate_sac(env, actor, obs_rms, device, episodes=10):
+    """
+    SAC evaluation function - returns unified evaluation results dict.
+    Matches the structure of QVPO's evaluate() function.
+    """
+    actor.eval()
+    returns = np.zeros((episodes,), dtype=np.float32)
+    
+    # Leakage rate statistics
+    eval_leakage_count = 0
+    eval_total_users = 0
+    
+    # SNR statistics - collect average per episode
+    legal_snr_db_list = []
+    eav_snr_max_db_list = []
+    eav_snr_avg_db_list = []
+    
+    for i in range(episodes):
+        eval_obs, _ = env.reset()
+        eval_done = False
+        eval_episode_ret = 0.0
+        
+        # Per-episode SNR collection
+        ep_legal_snr_list = []
+        ep_eav_snr_max_list = []
+        ep_eav_snr_avg_list = []
+        
+        while not eval_done:
+            # Normalize observation using training statistics
+            norm_eval_obs = obs_rms.normalize(eval_obs)
+            
+            with torch.no_grad():
+                # Get deterministic action (mean)
+                _, _, eval_action_mean = actor.get_action(
+                    torch.Tensor(norm_eval_obs).to(device).unsqueeze(0)
+                )
+                eval_action = eval_action_mean.cpu().numpy().flatten()
+            
+            eval_next_obs, eval_r, eval_term, eval_trunc, eval_info = env.step(eval_action)
+            eval_episode_ret += eval_r
+            eval_done = eval_term or eval_trunc
+            eval_obs = eval_next_obs
+            
+            # Accumulate leakage rate statistics
+            eval_leakage_count += eval_info.get('leakage_count', 0)
+            eval_total_users += eval_info.get('total_users', 0)
+            
+            # Collect SNR information
+            legal_snr = eval_info.get('eta_0', np.nan)
+            if not np.isnan(legal_snr):
+                ep_legal_snr_list.append(legal_snr)
+        
+        returns[i] = eval_episode_ret
+        
+        # Calculate per-episode SNR statistics
+        if len(ep_legal_snr_list) > 0:
+            legal_snr_db_list.append(np.mean(ep_legal_snr_list))
+        else:
+            legal_snr_db_list.append(np.nan)
+        
+        # Eavesdropper SNR placeholder (needs environment support)
+        eav_snr_max_db_list.append(np.nan)
+        eav_snr_avg_db_list.append(np.nan)
+    
+    actor.train()
+    
+    mean_return = np.mean(returns)
+    std_return = np.std(returns)
+    
+    # Calculate evaluation leakage rate
+    eval_leakage_rate = eval_leakage_count / eval_total_users if eval_total_users > 0 else 0.0
+    
+    # Calculate SNR statistics
+    legal_snr_db_mean = np.nanmean(legal_snr_db_list) if len(legal_snr_db_list) > 0 else np.nan
+    legal_snr_db_std = np.nanstd(legal_snr_db_list) if len(legal_snr_db_list) > 0 else np.nan
+    eav_snr_max_db_mean = np.nanmean(eav_snr_max_db_list) if len(eav_snr_max_db_list) > 0 else np.nan
+    eav_snr_avg_db_mean = np.nanmean(eav_snr_avg_db_list) if len(eav_snr_avg_db_list) > 0 else np.nan
+    
+    # Calculate SNR gap
+    if not np.isnan(legal_snr_db_mean) and not np.isnan(eav_snr_max_db_mean):
+        snr_gap_db_mean = legal_snr_db_mean - eav_snr_max_db_mean
+    else:
+        snr_gap_db_mean = np.nan
+    
+    # Print evaluation results (matching QVPO format)
+    print('-' * 60)
+    print(f'reward: {mean_return:<5.1f}  '
+          f'std: {std_return:<5.1f}  '
+          f'leakage_rate: {eval_leakage_rate:.2%}')
+    print(returns)
+    print('-' * 60)
+    
+    # Return unified evaluation results dict
+    eval_results = {
+        'mean_return': float(mean_return),
+        'std_return': float(std_return),
+        'eval_leakage_rate': float(eval_leakage_rate),
+        'legal_snr_db_mean': float(legal_snr_db_mean),
+        'legal_snr_db_std': float(legal_snr_db_std),
+        'eav_snr_max_db_mean': float(eav_snr_max_db_mean),
+        'eav_snr_avg_db_mean': float(eav_snr_avg_db_mean),
+        'snr_gap_db_mean': float(snr_gap_db_mean),
+        'eval_episode_count': episodes,
+    }
+    
+    return eval_results
+
 if __name__ == "__main__":
     args = parse_args()
     
     current_time_str = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    run_id = f"sac_seed{args.seed}_{current_time_str}"
     log_dir = os.path.join("record", "sac", f"{args.exp_name}_{current_time_str}")
     writer = SummaryWriter(log_dir)
+    
+    # CSV logging initialization
+    csv_dir = os.path.join(log_dir, 'csv_logs')
+    scenario_name = create_scenario_name(args)
+    csv_logger = CSVExperimentLogger(
+        run_id=run_id,
+        algorithm='SAC',
+        seed=args.seed,
+        scenario_name=scenario_name,
+        eval_interval=args.eval_frequency,
+        csv_dir=csv_dir
+    )
+    
+    print(f"\n{'#'*60}")
+    print(f"# SAC Training Configuration")
+    print(f"# Seed: {args.seed}")
+    print(f"# Total steps: {args.total_timesteps}")
+    print(f"# Run ID: {run_id}")
+    print(f"{'#'*60}\n")
 
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -260,6 +389,13 @@ if __name__ == "__main__":
     # 泄露率统计（对齐main.py）
     train_leakage_count = 0
     train_total_users = 0
+    
+    # Best result tracking for CSV logging
+    best_eval_reward = -float('inf')
+    best_step = 0
+    
+    # Training start time for CSV logging
+    training_start_time = time.time()
     
     obs, _ = env.reset(seed=args.seed)
     # 初始状态更新到归一化器
@@ -434,67 +570,61 @@ if __name__ == "__main__":
         # 🔥 评估逻辑 (完全对齐 main.py)
         # ============================================================
         if global_step > 0 and global_step % args.eval_frequency == 0:
-            print(f"Evaluating at step {global_step}")
+            print(f"\n{'='*60}")
+            print(f"Evaluation at step {global_step}")
             print(f"{'='*60}")
             
-            # SAC评估时不需要同步Env内部的归一化器(因为Env是Raw的)
-            # 而是直接使用 obs_rms 对 eval_env 的输出进行归一化
+            # Use unified evaluate function
+            eval_results = evaluate_sac(eval_env, actor, obs_rms, device, episodes=args.eval_episodes)
             
-            actor.eval()
-            returns = np.zeros((args.eval_episodes,), dtype=np.float32)
+            # TensorBoard logging (保持原有逻辑)
+            writer.add_scalar('reward/eval_mean', eval_results['mean_return'], global_step)
+            writer.add_scalar('security/eval_leakage_rate', eval_results['eval_leakage_rate'], global_step)
             
-            # 评估泄露率统计（对齐main.py）
-            eval_leakage_count = 0
-            eval_total_users = 0
+            # CSV logging for training metrics
+            time_elapsed = time.time() - training_start_time
+            train_reward_current = episode_reward if 'episode_reward' in locals() else np.nan
+            train_reward_ma = float(np.mean(recent_rewards)) if len(recent_rewards) > 0 else np.nan
             
-            for i in range(args.eval_episodes):
-                eval_obs, _ = eval_env.reset()
-                eval_done = False
-                eval_episode_ret = 0.0
-                
-                while not eval_done:
-                    # 🔥 使用训练得到的统计量归一化评估状态
-                    norm_eval_obs = obs_rms.normalize(eval_obs)
-                    
-                    with torch.no_grad():
-                        # 获取确定性动作 (mean)
-                        _, _, eval_action_mean = actor.get_action(
-                            torch.Tensor(norm_eval_obs).to(device).unsqueeze(0)
-                        )
-                        eval_action = eval_action_mean.cpu().numpy().flatten()
-                    
-                    eval_next_obs, eval_r, eval_term, eval_trunc, eval_info = eval_env.step(eval_action)
-                    eval_episode_ret += eval_r
-                    eval_done = eval_term or eval_trunc
-                    eval_obs = eval_next_obs
-                    
-                    # 累计泄露率统计（对齐main.py）
-                    eval_leakage_count += eval_info.get('leakage_count', 0)
-                    eval_total_users += eval_info.get('total_users', 0)
-                
-                returns[i] = eval_episode_ret
+            csv_logger.log_training_metrics(
+                eval_results=eval_results,
+                step=global_step,
+                time_elapsed_sec=time_elapsed,
+                train_reward=train_reward_current,
+                train_reward_ma100=train_reward_ma
+            )
             
-            mean_return = np.mean(returns)
-            std_return = np.std(returns)
-            
-            # 计算评估泄露率（对齐main.py）
-            eval_leakage_rate = eval_leakage_count / eval_total_users if eval_total_users > 0 else 0.0
-            
-            # 🔥 记录测试时的指标 (与 main.py 完全一致)
-            writer.add_scalar('reward/eval_mean', mean_return, global_step)
-            writer.add_scalar('security/eval_leakage_rate', eval_leakage_rate, global_step)
-            
-            # 打印格式对齐main.py
-            print('-' * 60)
-            print(f'Num steps: {global_step:<5}  '
-                  f'reward: {mean_return:<5.1f}  '
-                  f'std: {std_return:<5.1f}  '
-                  f'leakage_rate: {eval_leakage_rate:.2%}')
-            print(returns)
-            print('-' * 60)
-            
-            actor.train()
+            # Track best result
+            if eval_results['mean_return'] > best_eval_reward:
+                best_eval_reward = eval_results['mean_return']
+                best_step = global_step
+                print(f"New best result: {best_eval_reward:.2f}!")
 
+    # Training completed - perform final evaluation
+    print(f"\n{'='*60}")
+    print(f"Training completed! Performing final evaluation...")
+    print(f"{'='*60}")
+    
+    final_eval_results = evaluate_sac(eval_env, actor, obs_rms, device, episodes=args.eval_episodes)
+    training_total_time = time.time() - training_start_time
+    
+    # CSV logging for final comparison
+    csv_logger.log_final_comparison(
+        final_eval_results=final_eval_results,
+        total_train_steps=global_step,
+        best_eval_reward=best_eval_reward,
+        best_step=best_step,
+        training_time_sec=training_total_time
+    )
+    
+    print(f"Total steps: {global_step}")
+    print(f"Best evaluation result: {best_eval_reward:.2f} at step {best_step}")
+    print(f"Final evaluation result: {final_eval_results['mean_return']:.2f}")
+    print(f"Final leakage rate: {final_eval_results['eval_leakage_rate']:.2%}")
+    print(f"Training time: {training_total_time:.2f} seconds")
+    print(f"CSV logs saved to: {csv_dir}")
+    print(f"{'='*60}")
+    
     env.close()
     eval_env.close()
     writer.close()
