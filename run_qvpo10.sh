@@ -1,16 +1,15 @@
-# 3/23 18:31
-# eav_penalty_coef 5     --chosen 2  batchsize 256
-# 降低critic rl
+# 3/23 20:50
+# eav_penalty_coef 5     --chosen 2   256
+#   chosen 4    与实验4对比
 python main.py \
   --env_name Env \
   --seed 42 \
-  --num_steps 360000 \
-  --load_id 26_03_23_16_33_01_0 \
+  --num_steps 400000 \
   --batch_size 256 \
   --gamma 0.99 \
   --tau 0.005 \
   --diffusion_lr 0.0001 \
-  --critic_lr 0.0003 \
+  --critic_lr 0.0004 \
   --n_timesteps 20 \
   --beta_schedule cosine \
   --entropy_alpha 0.05 \
@@ -20,7 +19,7 @@ python main.py \
   --eval_sample 16 \
   --ac_grad_norm 1.0 \
   --q_transform qadv \
-  --chosen 2 \
+  --chosen 4 \
   --q_neg 0.001 \
   --cut 0.8 \
   --policy_freq 2 \
@@ -39,4 +38,4 @@ python main.py \
   --comm_penalty_cap_per_user 15.0 \
   --comm_penalty_cap_total 30.0 \
   --start_steps 10000 \
-  --cuda cuda:3
+  --cuda cuda:0
