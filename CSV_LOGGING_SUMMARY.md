@@ -59,9 +59,9 @@ eval_snr_gap_db_mean, train_reward, train_reward_ma100, time_elapsed_sec
 - `eval_leakage_rate`: Sensing leakage rate (fraction of users with SNR > threshold)
 - `eval_legal_snr_db_mean`: Mean legal receiver sensing SNR (dB)
 - `eval_legal_snr_db_ep_std`: Std of legal receiver sensing SNR across episodes
-- `eval_eav_snr_max_db_mean`: Mean of max eavesdropper SNR (dB) - **Currently NaN, needs env support**
-- `eval_eav_snr_avg_db_mean`: Mean of avg eavesdropper SNR (dB) - **Currently NaN, needs env support**
-- `eval_snr_gap_db_mean`: Security margin (legal - max_eav) - **Currently NaN**
+- `eval_eav_snr_max_db_mean`: Mean of max eavesdropper SNR (dB)
+- `eval_eav_snr_avg_db_mean`: Mean of avg eavesdropper SNR (dB)
+- `eval_snr_gap_db_mean`: Security margin (legal - max_eav)
 - `train_reward`: Current training episode reward (NaN if not available)
 - `train_reward_ma100`: 100-episode moving average of training reward
 - `time_elapsed_sec`: Time elapsed since training start (seconds)
@@ -93,9 +93,9 @@ final_snr_gap_db, best_eval_reward, best_step, training_time_sec
 - `final_leakage_rate`: Final sensing leakage rate
 - `final_legal_snr_db`: Final legal receiver sensing SNR (dB)
 - `final_legal_snr_db_std`: Final legal receiver sensing SNR std
-- `final_eav_snr_max_db`: Final max eavesdropper SNR (dB) - **Currently NaN**
-- `final_eav_snr_avg_db`: Final avg eavesdropper SNR (dB) - **Currently NaN**
-- `final_snr_gap_db`: Final security margin - **Currently NaN**
+- `final_eav_snr_max_db`: Final max eavesdropper SNR (dB)
+- `final_eav_snr_avg_db`: Final avg eavesdropper SNR (dB)
+- `final_snr_gap_db`: Final security margin
 - `best_eval_reward`: Best evaluation reward achieved during training
 - `best_step`: Step at which best_eval_reward was achieved
 - `training_time_sec`: Total training time (seconds)
@@ -113,9 +113,9 @@ Both `evaluate()` in main.py and `evaluate_sac()` in sac2.py return identical di
     'eval_leakage_rate': float,     # Leakage rate
     'legal_snr_db_mean': float,     # Mean legal SNR (dB)
     'legal_snr_db_std': float,      # Std legal SNR
-    'eav_snr_max_db_mean': float,   # Mean max eav SNR (currently NaN)
-    'eav_snr_avg_db_mean': float,   # Mean avg eav SNR (currently NaN)
-    'snr_gap_db_mean': float,       # Security margin (currently NaN)
+    'eav_snr_max_db_mean': float,   # Mean max eav SNR (dB)
+    'eav_snr_avg_db_mean': float,   # Mean avg eav SNR (dB)
+    'snr_gap_db_mean': float,       # Security margin (legal - max_eav)
     'eval_episode_count': int,      # Number of eval episodes
 }
 ```
@@ -147,23 +147,22 @@ Both `evaluate()` in main.py and `evaluate_sac()` in sac2.py return identical di
 
 ## Known Limitations & Future Work
 
-### 1. Eavesdropper SNR Statistics (Currently NaN)
-**Issue**: The environment (`myenv3.py`) calculates eavesdropper SNR internally but doesn't return it in the `info` dict.
+### 1. Eavesdropper SNR Statistics ✅ COMPLETED
+**Status**: ✅ **Fully implemented**
 
-**Current Status**: 
-- `eav_snr_max_db_mean`, `eav_snr_avg_db_mean`, `snr_gap_db_mean` are all NaN
-- Only `legal_snr_db_mean` (eta_0) is properly collected
+**Implementation**: 
+- Modified `myenv3.py` to include `eavesdropper_snr_list` in info dict
+- Updated `main.py` evaluate() to collect eavesdropper SNR statistics
+- Updated `sac2.py` evaluate_sac() to collect eavesdropper SNR statistics
+- All SNR fields now properly populated: `eav_snr_max_db_mean`, `eav_snr_avg_db_mean`, `snr_gap_db_mean`
 
-**Solution Required**: Modify `myenv3.py` to include eavesdropper SNR list in info dict:
+**Changes Made**:
 ```python
-# In _calculate_reward() method, add to info dict:
-info['eavesdropper_snr_list'] = eavesdropper_snr_list  # List of SNR values in dB
-```
+# myenv3.py - Added to info dict:
+info['eavesdropper_snr_list'] = eavesdropper_snr_list
 
-Then update evaluate functions to collect:
-```python
-# In evaluate loop:
-eav_snr_list = eval_info.get('eavesdropper_snr_list', [])
+# main.py & sac2.py - Collect in evaluate loop:
+eav_snr_list = info.get('eavesdropper_snr_list', [])
 if len(eav_snr_list) > 0:
     ep_eav_snr_max_list.append(max(eav_snr_list))
     ep_eav_snr_avg_list.append(np.mean(eav_snr_list))
@@ -245,15 +244,29 @@ qvpo_std_reward = qvpo_data['eval_reward_mean'].std()
 └── CSV_LOGGING_SUMMARY.md     # This file
 ```
 
-## Next Steps for Complete Implementation
+## Next Steps for Usage
 
-1. **Modify myenv3.py** to return eavesdropper SNR list in info dict
-2. **Update evaluate functions** to collect eavesdropper SNR statistics
+1. ✅ ~~Modify myenv3.py to return eavesdropper SNR list~~ - **COMPLETED**
+2. ✅ ~~Update evaluate functions to collect eavesdropper SNR statistics~~ - **COMPLETED**
 3. **Test with multiple seeds** to verify CSV aggregation works correctly
 4. **Create plotting scripts** to visualize training curves and final comparisons
 5. **Document scenario naming convention** if more parameters are needed
 
+## Recommended Testing
+
+```bash
+# Test QVPO with CSV logging
+python main.py --seed 0 --num_steps 50000
+
+# Test SAC with CSV logging
+python sac2.py --seed 0 --total-timesteps 50000
+
+# Verify CSV files are created in:
+# record/.../csv_logs/training_metrics_*.csv
+# record/.../csv_logs/final_comparison_*.csv
+```
+
 ---
 
 **Implementation Date**: 2026-03-24  
-**Status**: ✅ Core CSV logging complete, ⚠️ Eavesdropper SNR collection pending environment update
+**Status**: ✅ **FULLY COMPLETE** - All CSV logging and SNR statistics collection implemented

@@ -243,10 +243,22 @@ def evaluate_sac(env, actor, obs_rms, device, episodes=10):
             eval_leakage_count += eval_info.get('leakage_count', 0)
             eval_total_users += eval_info.get('total_users', 0)
             
-            # Collect SNR information
+            # 收集SNR信息（从info中获取）
+            # 统计口径说明：
+            # - legal_snr: 每个step的合法接收器感知SNR（标量）
+            # - eav_snr_list: 每个step的K个窃听用户的SNR列表
+            # - step_eav_snr_max: 该step下K个用户中的最大SNR
+            # - step_eav_snr_avg: 该step下K个用户的平均SNR
+            # 最终统计：对所有step求平均 -> episode平均 -> 多个episodes平均
             legal_snr = eval_info.get('eta_0', np.nan)
             if not np.isnan(legal_snr):
                 ep_legal_snr_list.append(legal_snr)
+            
+            # 收集窃听者SNR：每个step的最大值和平均值
+            eav_snr_list = eval_info.get('eavesdropper_snr_list', [])
+            if len(eav_snr_list) > 0:
+                ep_eav_snr_max_list.append(max(eav_snr_list))  # 该step的K个用户中的最大SNR
+                ep_eav_snr_avg_list.append(np.mean(eav_snr_list))  # 该step的K个用户的平均SNR
         
         returns[i] = eval_episode_ret
         
@@ -256,9 +268,16 @@ def evaluate_sac(env, actor, obs_rms, device, episodes=10):
         else:
             legal_snr_db_list.append(np.nan)
         
-        # Eavesdropper SNR placeholder (needs environment support)
-        eav_snr_max_db_list.append(np.nan)
-        eav_snr_avg_db_list.append(np.nan)
+        # Calculate eavesdropper SNR statistics
+        if len(ep_eav_snr_max_list) > 0:
+            eav_snr_max_db_list.append(np.mean(ep_eav_snr_max_list))
+        else:
+            eav_snr_max_db_list.append(np.nan)
+        
+        if len(ep_eav_snr_avg_list) > 0:
+            eav_snr_avg_db_list.append(np.mean(ep_eav_snr_avg_list))
+        else:
+            eav_snr_avg_db_list.append(np.nan)
     
     actor.train()
     
@@ -268,7 +287,12 @@ def evaluate_sac(env, actor, obs_rms, device, episodes=10):
     # Calculate evaluation leakage rate
     eval_leakage_rate = eval_leakage_count / eval_total_users if eval_total_users > 0 else 0.0
     
-    # Calculate SNR statistics
+    # 计算SNR统计（跨多个evaluation episodes的平均）
+    # 统计口径说明（平均安全暴露水平）：
+    # - legal_snr_db_mean: 所有eval episodes中所有steps的合法接收器SNR的平均值
+    # - eav_snr_max_db_mean: 所有eval episodes中，每个step的"K个用户最大SNR"的平均值
+    # - eav_snr_avg_db_mean: 所有eval episodes中，每个step的"K个用户平均SNR"的平均值
+    # 注意：这是"平均安全暴露水平"，不是"全局最坏时刻最大SNR"
     legal_snr_db_mean = np.nanmean(legal_snr_db_list) if len(legal_snr_db_list) > 0 else np.nan
     legal_snr_db_std = np.nanstd(legal_snr_db_list) if len(legal_snr_db_list) > 0 else np.nan
     eav_snr_max_db_mean = np.nanmean(eav_snr_max_db_list) if len(eav_snr_max_db_list) > 0 else np.nan
@@ -397,6 +421,10 @@ if __name__ == "__main__":
     # Training start time for CSV logging
     training_start_time = time.time()
     
+    # 训练奖励跟踪：记录最近一个已完成episode的总reward
+    # 用于CSV日志的train_reward字段，语义明确为"最近完成的训练episode总reward"
+    last_completed_episode_reward = np.nan
+    
     obs, _ = env.reset(seed=args.seed)
     # 初始状态更新到归一化器
     obs_rms.update(obs)
@@ -476,23 +504,31 @@ if __name__ == "__main__":
         # 更新归一化统计量 (用新遇到的 Raw State)
         obs_rms.update(obs)
 
-        # 4. 回合结束处理
-        if terminated or truncated:
+        # Episode 结束
+        done = terminated or truncated
+        if done:
             episodes_count += 1
+            
+            # Episode结束：更新last_completed_episode_reward
+            # 这个值将用于CSV日志的train_reward字段
+            last_completed_episode_reward = episode_reward
             
             recent_rewards.append(episode_reward)
             ema_reward = episode_reward if ema_reward is None else (0.95 * ema_reward + 0.05 * episode_reward)
             
-            # 🔥 对齐日志：使用与 main.py 一致的标签
+            # TensorBoard 记录
             writer.add_scalar('reward/train', episode_reward, global_step)
             writer.add_scalar('reward/train_ma100', float(np.mean(recent_rewards)), global_step)
             writer.add_scalar('reward/train_ema', float(ema_reward), global_step)
             
-            if episodes_count % 10 == 0:
-                print(f"Step: {global_step}, Episode: {episodes_count}, Reward: {episode_reward:.2f}")
-
-            obs, _ = env.reset(seed=None)
-            obs_rms.update(obs) # Reset 后也要 update
+            print(f'Episode: {episodes_count:<4}  '
+                  f'Steps: {episode_steps:<4}  '
+                  f'Global Step: {global_step:<7}  '
+                  f'Reward: {episode_reward:<5.1f}')
+            
+            # Reset episode
+            obs, _ = env.reset()
+            obs_rms.update(obs)
             episode_reward = 0
             episode_steps = 0
 
@@ -583,14 +619,15 @@ if __name__ == "__main__":
             
             # CSV logging for training metrics
             time_elapsed = time.time() - training_start_time
-            train_reward_current = episode_reward if 'episode_reward' in locals() else np.nan
+            # train_reward: 最近一个已完成训练episode的总reward（不是当前进行中的episode）
+            # 如果还没有完成任何episode，则为NaN
             train_reward_ma = float(np.mean(recent_rewards)) if len(recent_rewards) > 0 else np.nan
             
             csv_logger.log_training_metrics(
                 eval_results=eval_results,
                 step=global_step,
                 time_elapsed_sec=time_elapsed,
-                train_reward=train_reward_current,
+                train_reward=last_completed_episode_reward,
                 train_reward_ma100=train_reward_ma
             )
             
@@ -600,7 +637,14 @@ if __name__ == "__main__":
                 best_step = global_step
                 print(f"New best result: {best_eval_reward:.2f}!")
 
-    # Training completed - perform final evaluation
+    # ============================================================
+    # 训练结束 - 执行最终独立评估
+    # ============================================================
+    # 说明：
+    # 1. 这是训练结束后的独立评估，用于统一记录final_comparison CSV
+    # 2. 即使最后一个训练step恰好也触发了常规evaluate，仍保留此final evaluate
+    # 3. 这样可以保证最终结果记录流程一致，final_comparison中的数据以此为准
+    # 4. 不依赖最后一次中间评估的结果，确保final数据的独立性和可重复性
     print(f"\n{'='*60}")
     print(f"Training completed! Performing final evaluation...")
     print(f"{'='*60}")

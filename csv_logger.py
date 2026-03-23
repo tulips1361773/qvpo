@@ -231,11 +231,44 @@ def create_scenario_name(args) -> str:
         
     Returns:
         Scenario name string
+        
+    Note:
+        - seed is NOT included (recorded separately in CSV)
+        - Only key parameters that affect experiment results are included
+        - If a parameter doesn't exist, it's skipped (no error)
     """
     # Extract key parameters that define the scenario
     eav_threshold = getattr(args, 'eav_threshold', 10.0)
     comm_threshold = getattr(args, 'comm_threshold', 10.0)
     reward_scale = getattr(args, 'reward_scale', 0.1)
     
-    scenario = f"eav{eav_threshold:.1f}_comm{comm_threshold:.1f}_rs{reward_scale:.2f}"
+    # Build base scenario name
+    parts = [
+        f"eav{eav_threshold:.1f}",
+        f"comm{comm_threshold:.1f}",
+        f"rs{reward_scale:.2f}"
+    ]
+    
+    # Add penalty coefficients if they exist
+    eav_penalty_coef = getattr(args, 'eav_penalty_coef', None)
+    if eav_penalty_coef is not None:
+        parts.append(f"epc{eav_penalty_coef:.1f}")
+    
+    comm_penalty_coef = getattr(args, 'comm_penalty_coef', None)
+    if comm_penalty_coef is not None:
+        parts.append(f"cpc{comm_penalty_coef:.1f}")
+    
+    # Add user count if exists (check multiple possible names)
+    n_cu = getattr(args, 'N_cu', getattr(args, 'n_cu', getattr(args, 'K', None)))
+    if n_cu is not None:
+        parts.append(f"k{n_cu}")
+    
+    # Add episode length if exists (check multiple possible names)
+    episode_len = getattr(args, 'max_episode_steps', 
+                         getattr(args, 'episode_length', 
+                                getattr(args, 'T', None)))
+    if episode_len is not None:
+        parts.append(f"T{episode_len}")
+    
+    scenario = "_".join(parts)
     return scenario
