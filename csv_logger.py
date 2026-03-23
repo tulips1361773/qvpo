@@ -79,7 +79,7 @@ class CSVExperimentLogger:
         self.eval_interval = eval_interval
         self.csv_dir = csv_dir
         
-        # Create CSV directory
+        # Create CSV directory if it doesn't exist
         os.makedirs(csv_dir, exist_ok=True)
         
         # CSV file paths

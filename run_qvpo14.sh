@@ -1,14 +1,13 @@
-# 3/24 2:08
-# eav_penalty_coef 5     --chosen 2 256
-# 一次延长训练时间  对比实验4
-# 已经修改tau，因此这个实验是分阶段修改tau实验
+# 3/24 2:28
+# eav_penalty_coef 5     --chosen 2 256   0.002
+# 测试分阶段改变tau的效果
 python main.py \
   --env_name Env \
   --seed 42 \
   --num_steps 500000 \
   --batch_size 256 \
   --gamma 0.99 \
-  --tau 0.005 \
+  --tau 0.002 \
   --diffusion_lr 0.0001 \
   --critic_lr 0.0004 \
   --n_timesteps 20 \

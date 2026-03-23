@@ -275,9 +275,23 @@ class QVPO(object):
                         log_writer.add_scalar('q/running_q_std', float(self.running_q_std), t)
 
             """ Step Target network """
+            # # Dynamic tau switching: 0.005 before 300k, 0.002 after 300k
+            # # Preserves original self.tau parameter for compatibility
+            # tau_switch_step = 300000
+            # if self.step < tau_switch_step:
+            #     current_tau = 0.005
+            # else:
+            #     current_tau = 0.002
+            
+            # # Log tau switch event (only once)
+            # if self.step == tau_switch_step:
+            #     print(f"[QVPO] Switching tau from 0.005 to 0.002 at step {self.step}")
+            
+            # Critic target network soft update (every step)
             for param, target_param in zip(self.critic.parameters(), self.critic_target.parameters()):
                 target_param.data.copy_(self.tau * param.data + (1 - self.tau) * target_param.data)
 
+            # Actor target network soft update (every update_actor_target_every steps)
             if self.step % self.update_actor_target_every == 0:
                 for param, target_param in zip(self.actor.parameters(), self.actor_target.parameters()):
                     target_param.data.copy_(self.tau * param.data + (1 - self.tau) * target_param.data)
