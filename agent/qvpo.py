@@ -12,6 +12,7 @@ from agent.flow_matching import FlowMatchingPolicy
 from agent.vae import VAE
 from agent.helpers import EMA
 from agent.q_transform import *
+from agent.obs_normalizer import ObsNormalizer
 import os
 
 
@@ -103,15 +104,37 @@ class QVPO(object):
         else:
             self.action_scale = (action_space.high - action_space.low) / 2.
             self.action_bias = (action_space.high + action_space.low) / 2.
+        
+        # Agent-side observation normalizer (optional)
+        self.use_obs_normalizer = getattr(args, 'use_obs_normalizer', False)
+        self.obs_norm_freeze_after = getattr(args, 'obs_norm_freeze_after', 50000)
+        if self.use_obs_normalizer:
+            obs_norm_clip = getattr(args, 'obs_norm_clip', 5.0)
+            obs_norm_eps = getattr(args, 'obs_norm_eps', 1e-8)
+            self.obs_normalizer = ObsNormalizer(
+                state_dim=state_dim,
+                epsilon=obs_norm_eps,
+                clip_range=obs_norm_clip,
+                device=device
+            )
+            print(f"[QVPO] ObsNormalizer enabled: clip={obs_norm_clip}, eps={obs_norm_eps}, freeze_after={self.obs_norm_freeze_after}")
+        else:
+            self.obs_normalizer = None
+            print("[QVPO] ObsNormalizer disabled")
 
     def append_memory(self, state, action, reward, next_state, mask):
         action = (action - self.action_bias) / self.action_scale
-
+        
+        # Store fixed-scaled state (NOT normalized) in replay buffer
         self.memory.append(state, action, reward, next_state, mask)
         if not self.aug:
             self.diffusion_memory.append(state, action)
 
     def sample_action(self, state, eval=False, env_info=None):
+        # Apply obs normalization if enabled (update stats during training)
+        if self.obs_normalizer is not None:
+            state = self.obs_normalizer.normalize(state, update_stats=(not eval))
+        
         state = torch.FloatTensor(state.reshape(1, -1)).to(self.device)
 
         normal = False
@@ -125,6 +148,11 @@ class QVPO(object):
 
     def action_aug(self, batch_size, log_writer, return_mean_std=False):
         states, actions, rewards, next_states, masks = self.memory.sample(batch_size)
+        
+        # Normalize batch (no stats update for replay samples)
+        if self.obs_normalizer is not None:
+            states = self.obs_normalizer.normalize_batch(states)
+        
         old_states = states
         states, best_actions, v_target, (mean, std) = self.actor.sample_n(states, times=self.train_sample, chosen=self.chosen, q_func=self.critic, origin=actions)
         v = v_target[1]
@@ -136,6 +164,11 @@ class QVPO(object):
 
     def action_gradient(self, batch_size, log_writer, return_mean_std=False):
         states, best_actions, idxs = self.diffusion_memory.sample(batch_size)
+        
+        # Normalize batch (no stats update)
+        if self.obs_normalizer is not None:
+            states = self.obs_normalizer.normalize_batch(states)
+        
         q1, q2 = self.critic(states, best_actions)
         q = torch.min(q1, q2)
         mean = q.mean()
@@ -173,9 +206,19 @@ class QVPO(object):
             return states, best_actions
 
     def train(self, t, iterations, batch_size=256, log_writer=None):
+        # Check if we should freeze obs normalizer
+        if self.obs_normalizer is not None and not self.obs_normalizer.frozen:
+            if t >= self.obs_norm_freeze_after:
+                self.obs_normalizer.freeze()
+        
         for itr in range(iterations):
             # Sample replay buffer / batch
             states, actions, rewards, next_states, masks = self.memory.sample(batch_size)
+            
+            # Normalize states and next_states (no stats update for replay)
+            if self.obs_normalizer is not None:
+                states = self.obs_normalizer.normalize_batch(states)
+                next_states = self.obs_normalizer.normalize_batch(next_states)
 
             """ Q Training """
             current_q1, current_q2 = self.critic(states, actions)
@@ -321,7 +364,7 @@ class QVPO(object):
 
 
     def aug_gradient(self, batch_size, log_writer, return_mean_std=False):
-
+        # action_aug already handles normalization
         states, best_actions, v, (mean, std) = self.action_aug(batch_size, log_writer, return_mean_std=True)
 
 

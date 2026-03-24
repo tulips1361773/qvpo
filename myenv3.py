@@ -31,50 +31,12 @@ def calc_energy(v_u_t: float, delta_t: float) -> float:
 
 
 # ============================================================
-# 状态归一化器 (保持 Welford 算法不变)
-# ============================================================
-class StateNormalizer:
-    def __init__(self, state_dim, epsilon=1e-4, clip_range=10.0):
-        self.state_dim = state_dim
-        self.epsilon = epsilon
-        self.clip_range = clip_range
-        self.mean = np.zeros(state_dim, dtype=np.float64)
-        self.M2 = np.zeros(state_dim, dtype=np.float64) 
-        self.var = np.ones(state_dim, dtype=np.float64)
-        self.count = 0.0
-        self.training = True
-        
-    def update(self, state):
-        x = np.asarray(state, dtype=np.float64)
-        self.count += 1
-        delta = x - self.mean
-        self.mean += delta / self.count
-        delta2 = x - self.mean
-        self.M2 += delta * delta2
-        if self.count > 1:
-            self.var = self.M2 / self.count
-        
-    def normalize(self, state, update_stats=None):
-        if update_stats is None:
-            update_stats = self.training
-        if update_stats:
-            self.update(state)
-        std = np.sqrt(self.var + self.epsilon)
-        normalized = (state - self.mean) / std
-        normalized = np.clip(normalized, -self.clip_range, self.clip_range)
-        return normalized.astype(np.float32)
-    
-    def set_training(self, mode):
-        self.training = mode
-
-
-# ============================================================
 # 主环境类
 # ============================================================
 class UAVISACEnvironment(gym.Env):
     def __init__(self, N=50, K=3, H=100, H1=50, l_max=100, sigma2=1e-14, delta_t: float = 4.0,
                  E_tot: float = 25000.0, energy_penalty: float = 5.0,
-                 normalize_state=True, normalize_reward=True,
+                 use_state_scaling=True,
                  
                  # 感知与安全参数
                  eav_threshold: float = 10.0, 
@@ -127,15 +89,15 @@ class UAVISACEnvironment(gym.Env):
         self.P_max = 0.1
         self.action_space = spaces.Box(low=-1, high=1, shape=(3,), dtype=np.float32)
         obs_dim = (2 + 2 * self.K + 3) * 2
-        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32)
+        self.use_state_scaling = use_state_scaling
+        if self.use_state_scaling:
+            self.observation_space = spaces.Box(low=-1.0, high=1.0, shape=(obs_dim,), dtype=np.float32)
+        else:
+            self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32)
 
         self.total_energy = 0.0
         self.current_episode_reward = 0
         self.prev_obs = None
-        
-        self.normalize_state = normalize_state
-        if self.normalize_state:
-            self.state_normalizer = StateNormalizer(state_dim=obs_dim)
 
         self.reset()
 
@@ -163,24 +125,40 @@ class UAVISACEnvironment(gym.Env):
         self.radar_receiver_position = np.array([0.0, 0.0, 0.0])
         self.prev_action = np.array([0.0, 0.0, 0.0])
 
-        current_obs = self._get_obs()
-        self.prev_obs = np.zeros_like(current_obs)
+        self.prev_obs = np.zeros(2 + 2 * self.K + 3, dtype=np.float32)
         combined_obs = self._get_combined_obs()
-        
-        if self.normalize_state:
-            combined_obs = self.state_normalizer.normalize(combined_obs)
         
         return combined_obs, {}
 
-    def _get_obs(self):
+    def _get_raw_obs(self):
+        """Return raw single-frame observation (unscaled)."""
         return np.concatenate([
             self.uav_position[:2],
             self.user_positions[:, :2].flatten(),
             self.prev_action
         ])
 
+    def _scale_obs(self, obs):
+        """Apply fixed manual scaling to a single-frame observation.
+        
+        Coordinates (UAV x/y, users x/y): divide by 400.0 → [-1, 1]
+        prev_action: already in [-1, 1], kept as-is.
+        """
+        scaled = obs.copy().astype(np.float32)
+        coord_end = 2 + 2 * self.K
+        scaled[:coord_end] /= 400.0
+        return scaled
+
     def _get_combined_obs(self):
-        return np.concatenate([self._get_obs(), self.prev_obs])
+        """Return combined observation [current, prev], with optional fixed scaling."""
+        raw = self._get_raw_obs()
+        if self.use_state_scaling:
+            current = self._scale_obs(raw)
+            prev = self._scale_obs(self.prev_obs)
+        else:
+            current = raw.astype(np.float32)
+            prev = self.prev_obs.astype(np.float32)
+        return np.concatenate([current, prev])
 
     def step(self, action):
         angle = action[0] * np.pi
@@ -233,10 +211,8 @@ class UAVISACEnvironment(gym.Env):
 
         done = (self.current_slot == 50)
         
-        current_obs = self._get_obs()
+        current_obs = self._get_raw_obs()
         combined_obs = self._get_combined_obs()
-        if self.normalize_state:
-            combined_obs = self.state_normalizer.normalize(combined_obs)
         self.prev_obs = current_obs.copy()
 
         return combined_obs, reward, done, False, info

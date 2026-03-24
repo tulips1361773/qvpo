@@ -175,28 +175,34 @@ def readParser():
     parser.add_argument('--load_id', type=str, default=None, metavar='S',
                         help="optional model id to load from ./results before training")
     
-    # f525f525f525                  
+    # State preprocessing arguments
     if hasattr(argparse, 'BooleanOptionalAction'):
-        parser.add_argument('--normalize_state', action=argparse.BooleanOptionalAction, default=True,
-                            help="enable state normalization (default: True)")
+        parser.add_argument('--use_state_scaling', action=argparse.BooleanOptionalAction, default=True,
+                            help="enable fixed state scaling in environment (default: True)")
+        parser.add_argument('--use_obs_normalizer', action=argparse.BooleanOptionalAction, default=False,
+                            help="enable agent-side Welford obs normalizer (default: False)")
     else:
-        parser.add_argument('--normalize_state', type=_str2bool, nargs='?', const=True, default=True,
-                            help="enable state normalization (default: True)")
-    # parser.add_argument('--normalize_reward', type=bool, default=True,
-    #                     help="enable reward scaling (default: True)")
+        parser.add_argument('--use_state_scaling', type=_str2bool, nargs='?', const=True, default=True,
+                            help="enable fixed state scaling in environment (default: True)")
+        parser.add_argument('--use_obs_normalizer', type=_str2bool, nargs='?', const=True, default=False,
+                            help="enable agent-side Welford obs normalizer (default: False)")
+    
+    parser.add_argument('--obs_norm_freeze_after', type=int, default=50000, metavar='N',
+                        help="freeze obs normalizer stats after N steps (default: 50000)")
+    parser.add_argument('--obs_norm_clip', type=float, default=5.0, metavar='G',
+                        help="obs normalizer clip range (default: 5.0)")
+    parser.add_argument('--obs_norm_eps', type=float, default=1e-8, metavar='G',
+                        help="obs normalizer epsilon (default: 1e-8)")
 
     return parser.parse_args()
 
 
-def evaluate(env, agent, steps, source_env=None, episodes=10):
-    """评估函数 - 返回统一的评估结果字典"""
-    if source_env is not None and hasattr(source_env, 'state_normalizer') and hasattr(env, 'state_normalizer'):
-        env.state_normalizer.mean = source_env.state_normalizer.mean.copy()
-        env.state_normalizer.var = source_env.state_normalizer.var.copy()
-        env.state_normalizer.count = source_env.state_normalizer.count
-    # ✅ 新增：切换到评估模式（不再更新统计量）
-    if hasattr(env, 'state_normalizer'):
-        env.state_normalizer.set_training(False)
+def evaluate(env, agent, steps, episodes=10):
+    """评估函数 - 返回统一的评估结果字典
+    
+    Note: With fixed state scaling, train and eval environments use identical
+    state preprocessing. No normalizer synchronization needed.
+    """
     
     returns = np.zeros((episodes,), dtype=np.float32)
     
@@ -275,10 +281,6 @@ def evaluate(env, agent, steps, source_env=None, episodes=10):
         else:
             eav_snr_avg_db_list.append(np.nan)
     
-    # ✅ 新增：恢复训练模式
-    if hasattr(env, 'state_normalizer'):
-        env.state_normalizer.set_training(True)
-    
     mean_return = np.mean(returns)
     std_return = np.std(returns)
     
@@ -356,11 +358,15 @@ def main(args=None, logger=None, id=None):
 
     # 🔥🔥🔥 关键修改：直接实例化环境，传入归一化参数
     print("Initializing UAV-ISAC Environment...")
-    print(f"  - State normalization: {args.normalize_state}")
-    # print(f"  - Reward scaling: {args.normalize_reward}")
+    print(f"  - State scaling (fixed): {args.use_state_scaling}")
+    print(f"  - Agent-side obs normalizer: {args.use_obs_normalizer}")
+    if args.use_obs_normalizer:
+        print(f"    * Freeze after: {args.obs_norm_freeze_after} steps")
+        print(f"    * Clip range: {args.obs_norm_clip}")
+        print(f"    * Epsilon: {args.obs_norm_eps}")
     
     env = UAVISACEnvironment(
-        normalize_state=args.normalize_state,
+        use_state_scaling=args.use_state_scaling,
         eav_threshold=args.eav_threshold,
         eav_penalty_coef=args.eav_penalty_coef,
         eav_penalty_clip_max=args.eav_penalty_clip_max,
@@ -375,7 +381,7 @@ def main(args=None, logger=None, id=None):
     )
     
     eval_env = UAVISACEnvironment(
-        normalize_state=args.normalize_state,
+        use_state_scaling=args.use_state_scaling,
         eav_threshold=args.eav_threshold,
         eav_penalty_coef=args.eav_penalty_coef,
         eav_penalty_clip_max=args.eav_penalty_clip_max,
@@ -558,7 +564,7 @@ def main(args=None, logger=None, id=None):
                 print(f"\n{'='*60}")
                 print(f"Evaluation at step {steps}")
                 print(f"{'='*60}")
-                eval_results = evaluate(eval_env, agent, steps, source_env=env, episodes=10)
+                eval_results = evaluate(eval_env, agent, steps, episodes=10)
                 
                 # TensorBoard logging (保持原有逻辑)
                 writer.add_scalar('reward/eval_mean', eval_results['mean_return'], steps)
@@ -632,7 +638,7 @@ def main(args=None, logger=None, id=None):
     print(f"Training completed! Performing final evaluation...")
     print(f"{'='*60}")
     
-    final_eval_results = evaluate(eval_env, agent, steps, source_env=env, episodes=10)
+    final_eval_results = evaluate(eval_env, agent, steps, episodes=10)
     training_total_time = time.time() - training_start_time
     
     # CSV logging for final comparison
