@@ -1,4 +1,4 @@
-# 3/24 2:14
+# 3/24 2:43
 # eav_penalty_coef 5     --chosen 2 256   0.002
 # 一次延长训练时间  对比实验6,11
 python main.py \

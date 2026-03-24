@@ -411,6 +411,9 @@ def main(args=None, logger=None, id=None):
 
     recent_rewards = deque(maxlen=100)
     ema_reward = None
+    
+    # Episode-level leakage rate tracking (MA100)
+    recent_leakage_rates = deque(maxlen=100)
 
     # 创建经验池
     memory = ReplayMemory(state_size, action_size, memory_size, device)
@@ -432,8 +435,13 @@ def main(args=None, logger=None, id=None):
     print(f"Random exploration for first {start_steps} steps")
 
     # 泄露率统计变量
-    train_leakage_count = 0
-    train_total_users = 0
+    # Global cumulative (renamed to avoid confusion)
+    train_leakage_count_global = 0
+    train_total_users_global = 0
+    
+    # Window-based (200 steps)
+    window_leakage_count = 0
+    window_total_users = 0
     
     # 训练奖励跟踪：记录最近一个已完成episode的总reward
     # 用于CSV日志的train_reward字段，语义明确为"最近完成的训练episode总reward"
@@ -444,6 +452,10 @@ def main(args=None, logger=None, id=None):
         episode_steps = 0
         done = False
         truncated = False
+        
+        # Episode-level leakage tracking
+        episode_leakage_count = 0
+        episode_total_users = 0
         
         state, _ = env.reset(seed=args.seed + episodes)
         episodes += 1
@@ -467,8 +479,20 @@ def main(args=None, logger=None, id=None):
             next_state, reward, done, truncated, info = env.step(action)
 
             # 累计泄露率统计
-            train_leakage_count += info.get('leakage_count', 0)
-            train_total_users += info.get('total_users', 0)
+            step_leakage = info.get('leakage_count', 0)
+            step_users = info.get('total_users', 0)
+            
+            # Global cumulative (for reference only)
+            train_leakage_count_global += step_leakage
+            train_total_users_global += step_users
+            
+            # Window-based (200 steps)
+            window_leakage_count += step_leakage
+            window_total_users += step_users
+            
+            # Episode-level tracking
+            episode_leakage_count += step_leakage
+            episode_total_users += step_users
 
             if steps % 200 == 0:
                 writer.add_scalar('reward_terms/eta_0', float(info.get('eta_0', 0.0)), steps)
@@ -495,10 +519,22 @@ def main(args=None, logger=None, id=None):
                 writer.add_scalar('security/eav_penalty_raw', float(info.get('eav_penalty_raw', 0.0)), steps)
                 writer.add_scalar('security/eav_penalty_weighted', float(info.get('eav_penalty_weighted', 0.0)), steps)
                 
-                # 训练泄露率（每200步记录一次累计泄露率）
-                if train_total_users > 0:
-                    train_leakage_rate = train_leakage_count / train_total_users
-                    writer.add_scalar('security/train_leakage_rate', train_leakage_rate, steps)
+                # Window-based leakage rate (200 steps)
+                if window_total_users > 0:
+                    window_leakage_rate = window_leakage_count / window_total_users
+                    writer.add_scalar('security/train_leakage_rate_window200', window_leakage_rate, steps)
+                else:
+                    # Handle zero denominator: write 0.0 when no users in window
+                    writer.add_scalar('security/train_leakage_rate_window200', 0.0, steps)
+                
+                # Reset window counters after logging
+                window_leakage_count = 0
+                window_total_users = 0
+                
+                # Optional: Global cumulative leakage rate (renamed to avoid confusion)
+                if train_total_users_global > 0:
+                    train_leakage_rate_global = train_leakage_count_global / train_total_users_global
+                    writer.add_scalar('security/train_leakage_rate_global', train_leakage_rate_global, steps)
 
             # mask计算
             mask = 0.0 if (done or truncated) else args.gamma
@@ -554,6 +590,12 @@ def main(args=None, logger=None, id=None):
         # 这个值将用于CSV日志的train_reward字段
         last_completed_episode_reward = episode_reward
         
+        # Episode-level leakage rate (MA100)
+        if episode_total_users > 0:
+            episode_leakage_rate = episode_leakage_count / episode_total_users
+            recent_leakage_rates.append(episode_leakage_rate)
+        # Note: if episode_total_users == 0, we skip appending to avoid NaN in the deque
+        
         # 记录episode结束时的reward日志
         recent_rewards.append(episode_reward)
         ema_reward = episode_reward if ema_reward is None else (0.95 * ema_reward + 0.05 * episode_reward)
@@ -561,6 +603,10 @@ def main(args=None, logger=None, id=None):
         writer.add_scalar('reward/train', episode_reward, steps)
         writer.add_scalar('reward/train_ma100', float(np.mean(recent_rewards)), steps)
         writer.add_scalar('reward/train_ema', float(ema_reward), steps)
+        
+        # Episode-level leakage rate MA100
+        if len(recent_leakage_rates) > 0:
+            writer.add_scalar('security/train_leakage_rate_ma100', float(np.mean(recent_leakage_rates)), steps)
 
         if episodes % log_interval == 0:
             pass
