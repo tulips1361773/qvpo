@@ -156,6 +156,8 @@ class CSVExperimentLogger:
         }
         
         # Write to CSV
+        # Ensure directory exists (defensive programming)
+        os.makedirs(os.path.dirname(self.training_metrics_path), exist_ok=True)
         with open(self.training_metrics_path, 'a', newline='') as f:
             writer = csv.DictWriter(f, fieldnames=self.TRAINING_METRICS_FIELDS)
             writer.writerow(row)
@@ -214,6 +216,8 @@ class CSVExperimentLogger:
         }
         
         # Write to CSV (create with header if doesn't exist)
+        # Ensure directory exists (defensive programming)
+        os.makedirs(os.path.dirname(self.final_comparison_path), exist_ok=True)
         file_exists = os.path.isfile(self.final_comparison_path)
         with open(self.final_comparison_path, 'a', newline='') as f:
             writer = csv.DictWriter(f, fieldnames=self.FINAL_COMPARISON_FIELDS)
