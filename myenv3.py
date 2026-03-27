@@ -41,7 +41,8 @@ class UAVISACEnvironment(gym.Env):
                  # 感知与安全参数
                  eav_threshold: float = 10.0, 
                  eav_penalty_coef: float = 2.0, 
-                 eav_penalty_clip_max: float = 1000.0, # 默认设极大，实际逻辑中移除截断
+                 eav_penalty_clip_max: float = 1000.0,
+                 eav_softplus_kappa: float = 2.0,
                  
                  # 通信参数 (优先级较低)
                  comm_threshold=10.0,
@@ -69,7 +70,8 @@ class UAVISACEnvironment(gym.Env):
         # 核心奖励参数
         self.eav_threshold = eav_threshold
         self.eav_penalty_coef = eav_penalty_coef
-        self.eav_penalty_clip_max = eav_penalty_clip_max # 实际上不再作为硬截断使用
+        self.eav_penalty_clip_max = eav_penalty_clip_max
+        self.eav_softplus_kappa = eav_softplus_kappa
 
         self.comm_threshold = comm_threshold
         self.comm_penalty_coef = comm_penalty_coef
@@ -176,10 +178,23 @@ class UAVISACEnvironment(gym.Env):
            new_uav_position[1] < self.Y_min or new_uav_position[1] > self.Y_max:
             raw_reward = -100.0 # 越界重罚
             info = {
-                'eta_0': 0.0, 'comm_penalty': 0.0, 'eav_penalty': 0.0,
+                'eta_0': 0.0,
+                'eta_0_clipped': 0.0,
+                'max_eav_snr': 0.0,
+                'snr_gap_eav_raw': 0.0,
+                'eav_softplus_kappa': float(self.eav_softplus_kappa),
+                'eav_penalty_softplus': 0.0,
+                'eav_penalty_raw': 0.0,
+                'eav_penalty_clipped': 0.0,
+                'eav_penalty_weighted': 0.0,
+                'eav_penalty': 0.0,
+                'comm_penalty': 0.0,
+                'comm_penalty_clipped': 0.0,
+                'reward_raw': float(raw_reward),
                 'reward_final': raw_reward * self.reward_scale,
                 'leakage_count': 0,
                 'total_users': self.K,
+                'eavesdropper_snr_list': [],
             }
         else:
             # 正常计算奖励
@@ -228,6 +243,10 @@ class UAVISACEnvironment(gym.Env):
         eavesdropper_snr_list = self._calculate_sensing_snr_eavesdropper(uav_position, power_allocation)
         R_eav = 0.0
         eav_penalty_raw = 0.0
+        eav_penalty_softplus = 0.0
+        eav_penalty_clipped = 0.0
+        max_eav_snr = 0.0
+        snr_gap_eav = 0.0
         
         # 感知泄漏率统计：统计有多少用户的窃听SNR超过阈值
         leakage_count = 0
@@ -244,14 +263,21 @@ class UAVISACEnvironment(gym.Env):
             
             # 计算 Gap
             snr_gap_eav = max_eav_snr - self.eav_threshold
+
+            if snr_gap_eav > 0 :
+                # eav_penalty_raw is the value before softplus 
+                eav_penalty_raw = snr_gap_eav
+
+                # Softplus with configurable kappa
+                kappa = self.eav_softplus_kappa
+                eav_penalty_softplus = np.logaddexp(0.0, kappa * snr_gap_eav) / kappa
+                
+                
+                # Hard clipping after softplus, before multiplying coefficient
+                eav_penalty_clipped = min(eav_penalty_softplus, self.eav_penalty_clip_max)
             
-            # 关键修改：移除截断，使用 Softplus
-            # 使用 comm_softplus_kappa 或默认 2.0，让惩罚更陡峭
-            kappa = 2.0 
-            eav_penalty_raw = np.logaddexp(0.0, kappa * snr_gap_eav) / kappa
-            
-            # 乘上系数 (该系数在 auto.py 中会被校准得很大)
-            R_eav = eav_penalty_raw * self.eav_penalty_coef
+            # Multiply coefficient after clipping
+            R_eav = eav_penalty_clipped * self.eav_penalty_coef
 
         # 3. 通信惩罚 (Communication Penalty) - 次要项
         R_comm = 0.0
@@ -265,7 +291,8 @@ class UAVISACEnvironment(gym.Env):
                 
                 # Softplus
                 p_smooth = np.logaddexp(0.0, self.comm_softplus_kappa * snr_gap) / self.comm_softplus_kappa
-                comm_penalties.append(p_smooth)
+                p_clipped = min(p_smooth, self.comm_penalty_clip_per_user)
+                comm_penalties.append(p_clipped)
             
             avg_comm_penalty = np.mean(comm_penalties)
             # 对通信惩罚可以保留一个较宽的截断，避免它掩盖了安全惩罚
@@ -278,17 +305,26 @@ class UAVISACEnvironment(gym.Env):
 
         info = {
             'eta_0': float(eta_0),
-            'eta_0_clipped': float(min(eta_0, 30.0)),  # 添加裁剪后的感知SNR
+            'eta_0_clipped': float(R_sense),
+            
+            'max_eav_snr': float(max_eav_snr),
+            'snr_gap_eav_raw': float(snr_gap_eav),
+            'eav_softplus_kappa': float(self.eav_softplus_kappa),
+            
+            'eav_penalty_softplus': float(eav_penalty_softplus),
             'eav_penalty_raw': float(eav_penalty_raw),
+            'eav_penalty_clipped': float(eav_penalty_clipped),
             'eav_penalty_weighted': float(R_eav),
-            'eav_penalty': float(eav_penalty_raw),  # 对齐main.py的命名
-            'eav_penalty_clipped': float(eav_penalty_raw),  # myenv3中没有硬裁剪
+            'eav_penalty': float(eav_penalty_raw),
+            
             'comm_penalty': float(avg_comm_penalty),
-            'comm_penalty_clipped': float(avg_comm_penalty_clipped),  # 添加裁剪后的通信惩罚
+            'comm_penalty_clipped': float(avg_comm_penalty_clipped),
+            
             'reward_raw': float(reward),
+            
             'leakage_count': leakage_count,
             'total_users': total_users,
-            'eavesdropper_snr_list': eavesdropper_snr_list,  # 窃听者SNR列表 (dB)
+            'eavesdropper_snr_list': eavesdropper_snr_list,
         }
         return reward, info
 

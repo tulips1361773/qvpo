@@ -167,10 +167,10 @@ def readParser():
     # 建议3: 分项裁剪参数
     parser.add_argument('--eta_clip_max', type=float, default=15.0, metavar='G',
                         help="max clip value for sensing SNR (default: 15.0)")
-    parser.add_argument('--comm_penalty_clip_max', type=float, default=5.0, metavar='G',
-                        help="max clip value for comm penalty (default: 5.0)")
     parser.add_argument('--eav_penalty_clip_max', type=float, default=5.0, metavar='G',
                         help="max clip value for eav penalty (default: 5.0)")
+    parser.add_argument('--eav_softplus_kappa', type=float, default=2.0, metavar='G',
+                        help="softplus kappa for eav penalty (default: 2.0)")
 
     parser.add_argument('--load_id', type=str, default=None, metavar='S',
                         help="optional model id to load from ./results before training")
@@ -370,6 +370,7 @@ def main(args=None, logger=None, id=None):
         eav_threshold=args.eav_threshold,
         eav_penalty_coef=args.eav_penalty_coef,
         eav_penalty_clip_max=args.eav_penalty_clip_max,
+        eav_softplus_kappa=args.eav_softplus_kappa,
         comm_threshold=args.comm_threshold,
         comm_penalty_coef=args.comm_penalty_coef,
         comm_softplus_kappa=args.comm_softplus_kappa,
@@ -385,6 +386,7 @@ def main(args=None, logger=None, id=None):
         eav_threshold=args.eav_threshold,
         eav_penalty_coef=args.eav_penalty_coef,
         eav_penalty_clip_max=args.eav_penalty_clip_max,
+        eav_softplus_kappa=args.eav_softplus_kappa,
         comm_threshold=args.comm_threshold,
         comm_penalty_coef=args.comm_penalty_coef,
         comm_softplus_kappa=args.comm_softplus_kappa,
@@ -504,6 +506,7 @@ def main(args=None, logger=None, id=None):
                 writer.add_scalar('reward_terms/eta_0', float(info.get('eta_0', 0.0)), steps)
                 writer.add_scalar('reward_terms/comm_penalty', float(info.get('comm_penalty', 0.0)), steps)
                 writer.add_scalar('reward_terms/eav_penalty', float(info.get('eav_penalty', 0.0)), steps)
+                writer.add_scalar('reward_terms/eav_penalty_softplus', float(info.get('eav_penalty_softplus', 0.0)), steps)
                 writer.add_scalar('reward_terms/energy_penalty', float(info.get('energy_penalty', 0.0)), steps)
                 writer.add_scalar('reward_terms/boundary_penalty', float(info.get('boundary_penalty', 0.0)), steps)
                 writer.add_scalar('reward_terms/action_smooth_penalty', float(info.get('action_smooth_penalty', 0.0)), steps)
@@ -522,8 +525,13 @@ def main(args=None, logger=None, id=None):
                     step_leakage_rate = step_leakage_count / step_total_users
                     writer.add_scalar('security/step_leakage_rate', step_leakage_rate, steps)
                 writer.add_scalar('security/step_leakage_count', float(step_leakage_count), steps)
+                writer.add_scalar('security/max_eav_snr', float(info.get('max_eav_snr', 0.0)), steps)
+                writer.add_scalar('security/snr_gap_eav_raw', float(info.get('snr_gap_eav_raw', 0.0)), steps)
+                writer.add_scalar('security/eav_penalty_softplus', float(info.get('eav_penalty_softplus', 0.0)), steps)
                 writer.add_scalar('security/eav_penalty_raw', float(info.get('eav_penalty_raw', 0.0)), steps)
+                writer.add_scalar('security/eav_penalty_clipped', float(info.get('eav_penalty_clipped', 0.0)), steps)
                 writer.add_scalar('security/eav_penalty_weighted', float(info.get('eav_penalty_weighted', 0.0)), steps)
+                writer.add_scalar('security/eav_softplus_kappa', float(info.get('eav_softplus_kappa', 0.0)), steps)
                 
                 # Window-based leakage rate (200 steps)
                 if window_total_users > 0:
@@ -564,7 +572,7 @@ def main(args=None, logger=None, id=None):
                 print(f"\n{'='*60}")
                 print(f"Evaluation at step {steps}")
                 print(f"{'='*60}")
-                eval_results = evaluate(eval_env, agent, steps, episodes=10)
+                eval_results = evaluate(eval_env, agent, steps, episodes=30)
                 
                 # TensorBoard logging (保持原有逻辑)
                 writer.add_scalar('reward/eval_mean', eval_results['mean_return'], steps)
@@ -638,7 +646,7 @@ def main(args=None, logger=None, id=None):
     print(f"Training completed! Performing final evaluation...")
     print(f"{'='*60}")
     
-    final_eval_results = evaluate(eval_env, agent, steps, episodes=10)
+    final_eval_results = evaluate(eval_env, agent, steps, episodes=30)
     training_total_time = time.time() - training_start_time
     
     # CSV logging for final comparison

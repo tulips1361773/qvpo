@@ -123,8 +123,8 @@ def make_uav_env(args):
     """
     env = UAVISACEnvironment(
         # 核心参数
-        normalize_state=False,  # SAC使用Agent端归一化，禁用环境内部归一化
-        normalize_reward=True,
+        # normalize_state=False,  # SAC使用Agent端归一化，禁用环境内部归一化
+        # normalize_reward=True,
         
         # 窃听相关
         eav_threshold=args.eav_threshold,
