@@ -1,6 +1,6 @@
 # 2026/3/27  23:58
 # 对比 3/27/19:47，eval eposide从10变为30，个人通信惩罚从15变成3
-
+# eta clip=18-->30
 python main.py \
   --env_name Env \
   --seed 42 \

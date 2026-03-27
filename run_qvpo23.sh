@@ -1,6 +1,7 @@
 # 3/27 23：51
 # h和3/27/20:00对比
 # 将eval eposide变成30
+# eta clip=18-->30
 python main.py \
   --env_name Env \
   --seed 42 \
