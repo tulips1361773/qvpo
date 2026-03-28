@@ -162,6 +162,7 @@ class UAVISACEnvironment(gym.Env):
             prev = self.prev_obs.astype(np.float32)
         return np.concatenate([current, prev])
 
+
     def step(self, action):
         angle = action[0] * np.pi
         distance = action[1] * self.l_max
@@ -173,48 +174,131 @@ class UAVISACEnvironment(gym.Env):
         new_uav_position[0] += delta_x
         new_uav_position[1] += delta_y
 
+        # -----------------------------
+        # 统一初始化 reward breakdown
+        # -----------------------------
+        boundary_penalty_raw = 0.0
+        boundary_penalty_weighted = 0.0
+        energy_penalty_raw = 0.0
+        energy_penalty_weighted = 0.0
+        action_smooth_penalty_raw = 0.0
+        action_smooth_penalty_weighted = 0.0
+        is_out_of_bounds = 0.0
+
         # 边界处理
         if new_uav_position[0] < self.X_min or new_uav_position[0] > self.X_max or \
-           new_uav_position[1] < self.Y_min or new_uav_position[1] > self.Y_max:
-            raw_reward = -100.0 # 越界重罚
+        new_uav_position[1] < self.Y_min or new_uav_position[1] > self.Y_max:
+
+            is_out_of_bounds = 1.0
+            boundary_penalty_raw = 100.0
+            boundary_penalty_weighted = boundary_penalty_raw
+
+            reward_base_raw = -boundary_penalty_weighted
+
             info = {
                 'eta_0': 0.0,
                 'eta_0_clipped': 0.0,
+
                 'max_eav_snr': 0.0,
                 'snr_gap_eav_raw': 0.0,
                 'eav_softplus_kappa': float(self.eav_softplus_kappa),
+
                 'eav_penalty_softplus': 0.0,
                 'eav_penalty_raw': 0.0,
                 'eav_penalty_clipped': 0.0,
                 'eav_penalty_weighted': 0.0,
-                'eav_penalty': 0.0,
-                'comm_penalty': 0.0,
+                'eav_penalty': 0.0,  # 兼容旧字段
+
+                'comm_penalty': 0.0,                 # 兼容旧字段：raw/avg before coef
+                'comm_penalty_raw': 0.0,
                 'comm_penalty_clipped': 0.0,
-                'reward_raw': float(raw_reward),
-                'reward_final': raw_reward * self.reward_scale,
+                'comm_penalty_weighted': 0.0,
+
+                'boundary_penalty': float(boundary_penalty_raw),  # 兼容旧字段
+                'boundary_penalty_raw': float(boundary_penalty_raw),
+                'boundary_penalty_weighted': float(boundary_penalty_weighted),
+
+                'energy_penalty': 0.0,              # 兼容旧字段
+                'energy_penalty_raw': 0.0,
+                'energy_penalty_weighted': 0.0,
+
+                'action_smooth_penalty': 0.0,       # 兼容旧字段
+                'action_smooth_penalty_raw': 0.0,
+                'action_smooth_penalty_weighted': 0.0,
+
+                'reward_base_raw': float(reward_base_raw),
+                'reward_raw': float(reward_base_raw),   # 兼容旧字段：旧版 reward_raw
+                'reward_pre_scale': float(reward_base_raw),
+
                 'leakage_count': 0,
                 'total_users': self.K,
                 'eavesdropper_snr_list': [],
+
+                'is_out_of_bounds': float(is_out_of_bounds),
             }
         else:
             # 正常计算奖励
-            raw_reward, info = self._calculate_reward(new_uav_position, power_allocation)
+            reward_base_raw, info = self._calculate_reward(new_uav_position, power_allocation)
             self.uav_position = new_uav_position
+
+            # 兼容和补齐字段
+            info['boundary_penalty'] = 0.0
+            info['boundary_penalty_raw'] = 0.0
+            info['boundary_penalty_weighted'] = 0.0
+
+            info['energy_penalty'] = 0.0
+            info['energy_penalty_raw'] = 0.0
+            info['energy_penalty_weighted'] = 0.0
+
+            info['action_smooth_penalty'] = 0.0
+            info['action_smooth_penalty_raw'] = 0.0
+            info['action_smooth_penalty_weighted'] = 0.0
+
+            info['reward_base_raw'] = float(reward_base_raw)
+            info['reward_pre_scale'] = float(reward_base_raw)
+            info['is_out_of_bounds'] = 0.0
+
+        raw_reward = reward_base_raw
 
         # 能耗惩罚
         horizontal_speed = abs(distance) / 4.0
         energy_t = calc_energy(horizontal_speed, self.delta_t)
         self.total_energy += energy_t
         if self.total_energy > self.E_tot:
-            raw_reward -= self.energy_penalty
-        
+            energy_penalty_raw = float(self.energy_penalty)
+            energy_penalty_weighted = energy_penalty_raw
+            raw_reward -= energy_penalty_weighted
+
         # 动作平滑惩罚
         action_diff = action - self.prev_action
-        action_smooth_penalty = self.action_smooth_coef * np.sum(action_diff ** 2)
-        raw_reward -= action_smooth_penalty
+        action_smooth_penalty_raw = float(self.action_smooth_coef * np.sum(action_diff ** 2))
+        action_smooth_penalty_weighted = action_smooth_penalty_raw
+        raw_reward -= action_smooth_penalty_weighted
+
+        # 回填最终 breakdown
+        info['boundary_penalty'] = float(boundary_penalty_raw)  # 兼容旧字段
+        info['boundary_penalty_raw'] = float(boundary_penalty_raw)
+        info['boundary_penalty_weighted'] = float(boundary_penalty_weighted)
+
+        info['energy_penalty'] = float(energy_penalty_raw)  # 兼容旧字段
+        info['energy_penalty_raw'] = float(energy_penalty_raw)
+        info['energy_penalty_weighted'] = float(energy_penalty_weighted)
+
+        info['action_smooth_penalty'] = float(action_smooth_penalty_raw)  # 兼容旧字段
+        info['action_smooth_penalty_raw'] = float(action_smooth_penalty_raw)
+        info['action_smooth_penalty_weighted'] = float(action_smooth_penalty_weighted)
 
         info['reward_final_unscaled'] = float(raw_reward)
-        
+
+        # 自检项：理论上应接近 0
+        reconstructed = (
+            float(info.get('reward_base_raw', 0.0))
+            - float(info.get('boundary_penalty_weighted', 0.0))
+            - float(info.get('energy_penalty_weighted', 0.0))
+            - float(info.get('action_smooth_penalty_weighted', 0.0))
+        )
+        info['reward_reconstructed_error'] = float(reconstructed - raw_reward)
+
         # 最终缩放
         reward = raw_reward * self.reward_scale
         info['reward_final'] = float(reward)
@@ -225,7 +309,7 @@ class UAVISACEnvironment(gym.Env):
         self.current_slot += 1
 
         done = (self.current_slot == 50)
-        
+
         current_obs = self._get_raw_obs()
         combined_obs = self._get_combined_obs()
         self.prev_obs = current_obs.copy()
@@ -235,11 +319,9 @@ class UAVISACEnvironment(gym.Env):
     def _calculate_reward(self, uav_position, power_allocation):
         # 1. 感知收益 (Sensing Gain)
         eta_0 = self._calculate_sensing_snr_legal(uav_position, power_allocation)
-        # 对感知奖励进行软截断，防止正向奖励爆炸引导 Agent 走极端，但允许优秀表现
-        # 假设 30dB 已经是极好的值
         R_sense = min(eta_0, 30.0)
-        
-        # 2. 安全/窃听惩罚 (Security Penalty) - 核心优先项
+
+        # 2. 安全/窃听惩罚 (Security Penalty)
         eavesdropper_snr_list = self._calculate_sensing_snr_eavesdropper(uav_position, power_allocation)
         R_eav = 0.0
         eav_penalty_raw = 0.0
@@ -247,86 +329,75 @@ class UAVISACEnvironment(gym.Env):
         eav_penalty_clipped = 0.0
         max_eav_snr = 0.0
         snr_gap_eav = 0.0
-        
-        # 感知泄漏率统计：统计有多少用户的窃听SNR超过阈值
+
         leakage_count = 0
         total_users = self.K
-        
+
         if len(eavesdropper_snr_list) > 0:
             eav_snrs = np.array(eavesdropper_snr_list, dtype=np.float32)
-            
-            # 统计泄漏用户数（SNR超过阈值的用户）
+
             leakage_count = int(np.sum(eav_snrs > self.eav_threshold))
-            
-            # 使用 Max 策略，只要有一个窃听者超标，就算违规
             max_eav_snr = np.max(eav_snrs)
-            
-            # 计算 Gap
             snr_gap_eav = max_eav_snr - self.eav_threshold
 
-            if snr_gap_eav > 0 :
-                # eav_penalty_raw is the value before softplus 
+            if snr_gap_eav > 0:
                 eav_penalty_raw = snr_gap_eav
-
-                # Softplus with configurable kappa
                 kappa = self.eav_softplus_kappa
                 eav_penalty_softplus = np.logaddexp(0.0, kappa * snr_gap_eav) / kappa
-                
-                
-                # Hard clipping after softplus, before multiplying coefficient
                 eav_penalty_clipped = min(eav_penalty_softplus, self.eav_penalty_clip_max)
-            
-            # Multiply coefficient after clipping
+
             R_eav = eav_penalty_clipped * self.eav_penalty_coef
 
-        # 3. 通信惩罚 (Communication Penalty) - 次要项
+        # 3. 通信惩罚 (Communication Penalty)
         R_comm = 0.0
         avg_comm_penalty = 0.0
+        avg_comm_penalty_clipped = 0.0
+
         if self.K > 0:
             comm_penalties = []
             for k in range(self.K):
                 distance = np.linalg.norm(uav_position - self.user_positions[k])
                 snr = self._calculate_communication_snr(distance, power_allocation)
                 snr_gap = self.comm_threshold - snr
-                
-                # Softplus
+
                 p_smooth = np.logaddexp(0.0, self.comm_softplus_kappa * snr_gap) / self.comm_softplus_kappa
                 p_clipped = min(p_smooth, self.comm_penalty_clip_per_user)
                 comm_penalties.append(p_clipped)
-            
-            avg_comm_penalty = np.mean(comm_penalties)
-            # 对通信惩罚可以保留一个较宽的截断，避免它掩盖了安全惩罚
-            avg_comm_penalty_clipped = min(avg_comm_penalty, self.comm_penalty_clip_total)
-            
+
+            avg_comm_penalty = float(np.mean(comm_penalties))
+            avg_comm_penalty_clipped = float(min(avg_comm_penalty, self.comm_penalty_clip_total))
             R_comm = avg_comm_penalty_clipped * self.comm_penalty_coef
 
-        # 总奖励
-        reward = R_sense - R_eav - R_comm
+        # 基础奖励：还没扣 boundary / energy / smooth
+        reward_base_raw = R_sense - R_eav - R_comm
 
         info = {
             'eta_0': float(eta_0),
             'eta_0_clipped': float(R_sense),
-            
+
             'max_eav_snr': float(max_eav_snr),
             'snr_gap_eav_raw': float(snr_gap_eav),
             'eav_softplus_kappa': float(self.eav_softplus_kappa),
-            
+
             'eav_penalty_softplus': float(eav_penalty_softplus),
             'eav_penalty_raw': float(eav_penalty_raw),
             'eav_penalty_clipped': float(eav_penalty_clipped),
             'eav_penalty_weighted': float(R_eav),
-            'eav_penalty': float(eav_penalty_raw),
-            
-            'comm_penalty': float(avg_comm_penalty),
+            'eav_penalty': float(eav_penalty_raw),  # 兼容旧字段
+
+            'comm_penalty': float(avg_comm_penalty),  # 兼容旧字段
+            'comm_penalty_raw': float(avg_comm_penalty),
             'comm_penalty_clipped': float(avg_comm_penalty_clipped),
-            
-            'reward_raw': float(reward),
-            
+            'comm_penalty_weighted': float(R_comm),
+
+            'reward_base_raw': float(reward_base_raw),
+            'reward_raw': float(reward_base_raw),  # 兼容旧字段
+
             'leakage_count': leakage_count,
             'total_users': total_users,
             'eavesdropper_snr_list': eavesdropper_snr_list,
         }
-        return reward, info
+        return reward_base_raw, info
 
     # --- 物理公式计算函数 (保持原样) ---
     def _calculate_communication_snr(self, distance, power_allocation):

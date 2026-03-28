@@ -1,0 +1,42 @@
+# 2026/3/28 5:22  试试之前的参数
+#   --eav_penalty_coef 0.5 \
+#   --eav_penalty_clip_max 20.0 \
+#  --tau 0.003 \
+python main.py \
+  --env_name Env \
+  --seed 42 \
+  --num_steps 500000 \
+  --batch_size 256 \
+  --gamma 0.99 \
+  --tau 0.003 \
+  --diffusion_lr 0.0001 \
+  --critic_lr 0.0004 \
+  --n_timesteps 20 \
+  --beta_schedule cosine \
+  --entropy_alpha 0.05 \
+  --train_sample 32 \
+  --behavior_sample 8 \
+  --target_sample 2 \
+  --eval_sample 16 \
+  --ac_grad_norm 1.0 \
+  --q_transform qadv \
+  --chosen 2 \
+  --q_neg 0.001 \
+  --cut 0.8 \
+  --policy_freq 2 \
+  --weighted \
+  --aug \
+  --action_smooth_coef 0.1 \
+  --user_move_range 20.0 \
+  --reward_scale 0.1 \
+  --eav_threshold 10.0 \
+  --eav_penalty_coef 0.5 \
+  --eav_penalty_clip_max 20.0 \
+  --comm_threshold 10.0 \
+  --comm_penalty_coef 1.5 \
+  --comm_softplus_kappa 5.0 \
+  --comm_penalty_cap_per_user 3.0 \
+  --comm_penalty_cap_total 5.0 \
+  --start_steps 10000 \
+  --use_obs_normalizer False \
+  --cuda cuda:1

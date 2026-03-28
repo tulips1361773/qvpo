@@ -503,27 +503,67 @@ def main(args=None, logger=None, id=None):
             episode_total_users += step_users
 
             if steps % 200 == 0:
+                # -----------------------------
+                # Reward breakdown: 主分析图
+                # -----------------------------
+                writer.add_scalar('reward_terms/eta_0_raw', float(info.get('eta_0', 0.0)), steps)
+                writer.add_scalar('reward_terms/eta_0_clipped', float(info.get('eta_0_clipped', 0.0)), steps)
+
+                writer.add_scalar('reward_terms/eav_penalty_raw', float(info.get('eav_penalty_raw', 0.0)), steps)
+                writer.add_scalar('reward_terms/eav_penalty_softplus', float(info.get('eav_penalty_softplus', 0.0)), steps)
+                writer.add_scalar('reward_terms/eav_penalty_clipped', float(info.get('eav_penalty_clipped', 0.0)), steps)
+                writer.add_scalar('reward_terms/eav_penalty_weighted', float(info.get('eav_penalty_weighted', 0.0)), steps)
+
+                writer.add_scalar('reward_terms/comm_penalty_raw', float(info.get('comm_penalty_raw', info.get('comm_penalty', 0.0))), steps)
+                writer.add_scalar('reward_terms/comm_penalty_clipped', float(info.get('comm_penalty_clipped', 0.0)), steps)
+                writer.add_scalar('reward_terms/comm_penalty_weighted', float(info.get('comm_penalty_weighted', 0.0)), steps)
+
+                writer.add_scalar('reward_terms/boundary_penalty_raw', float(info.get('boundary_penalty_raw', info.get('boundary_penalty', 0.0))), steps)
+                writer.add_scalar('reward_terms/boundary_penalty_weighted', float(info.get('boundary_penalty_weighted', 0.0)), steps)
+
+                writer.add_scalar('reward_terms/energy_penalty_raw', float(info.get('energy_penalty_raw', info.get('energy_penalty', 0.0))), steps)
+                writer.add_scalar('reward_terms/energy_penalty_weighted', float(info.get('energy_penalty_weighted', 0.0)), steps)
+
+                writer.add_scalar('reward_terms/action_smooth_penalty_raw', float(info.get('action_smooth_penalty_raw', info.get('action_smooth_penalty', 0.0))), steps)
+                writer.add_scalar('reward_terms/action_smooth_penalty_weighted', float(info.get('action_smooth_penalty_weighted', 0.0)), steps)
+
+                writer.add_scalar('reward_terms/reward_base_raw', float(info.get('reward_base_raw', info.get('reward_raw', 0.0))), steps)
+                writer.add_scalar('reward_terms/reward_final_unscaled', float(info.get('reward_final_unscaled', 0.0)), steps)
+                writer.add_scalar('reward_terms/reward_final', float(info.get('reward_final', reward)), steps)
+
+                # -----------------------------
+                # 兼容旧图：保留一份旧标签
+                # -----------------------------
                 writer.add_scalar('reward_terms/eta_0', float(info.get('eta_0', 0.0)), steps)
                 writer.add_scalar('reward_terms/comm_penalty', float(info.get('comm_penalty', 0.0)), steps)
                 writer.add_scalar('reward_terms/eav_penalty', float(info.get('eav_penalty', 0.0)), steps)
-                writer.add_scalar('reward_terms/eav_penalty_softplus', float(info.get('eav_penalty_softplus', 0.0)), steps)
                 writer.add_scalar('reward_terms/energy_penalty', float(info.get('energy_penalty', 0.0)), steps)
                 writer.add_scalar('reward_terms/boundary_penalty', float(info.get('boundary_penalty', 0.0)), steps)
                 writer.add_scalar('reward_terms/action_smooth_penalty', float(info.get('action_smooth_penalty', 0.0)), steps)
                 writer.add_scalar('reward_terms/reward_raw', float(info.get('reward_raw', 0.0)), steps)
-                writer.add_scalar('reward_terms/reward_clip_1', float(info.get('reward_clip_1', reward)), steps)
-                writer.add_scalar('reward_terms/reward_final', float(info.get('reward_final', reward)), steps)
-                # 建议3: 分项裁剪后的值
-                writer.add_scalar('reward_terms/eta_0_clipped', float(info.get('eta_0_clipped', 0.0)), steps)
-                writer.add_scalar('reward_terms/comm_penalty_clipped', float(info.get('comm_penalty_clipped', 0.0)), steps)
-                writer.add_scalar('reward_terms/eav_penalty_clipped', float(info.get('eav_penalty_clipped', 0.0)), steps)
-                
-                # 感知泄漏率相关指标
+
+                # 旧的 reward_clip_1 是假指标，这里删除，不再记录
+                # writer.add_scalar('reward_terms/reward_clip_1', ...)
+
+                # -----------------------------
+                # 自检图：应接近 0
+                # -----------------------------
+                writer.add_scalar(
+                    'reward_terms/reward_reconstructed_error',
+                    float(info.get('reward_reconstructed_error', 0.0)),
+                    steps
+                )
+
+                # -----------------------------
+                # Safety / security
+                # -----------------------------
                 step_leakage_count = info.get('leakage_count', 0)
                 step_total_users = info.get('total_users', 0)
+
                 if step_total_users > 0:
                     step_leakage_rate = step_leakage_count / step_total_users
                     writer.add_scalar('security/step_leakage_rate', step_leakage_rate, steps)
+
                 writer.add_scalar('security/step_leakage_count', float(step_leakage_count), steps)
                 writer.add_scalar('security/max_eav_snr', float(info.get('max_eav_snr', 0.0)), steps)
                 writer.add_scalar('security/snr_gap_eav_raw', float(info.get('snr_gap_eav_raw', 0.0)), steps)
@@ -532,20 +572,22 @@ def main(args=None, logger=None, id=None):
                 writer.add_scalar('security/eav_penalty_clipped', float(info.get('eav_penalty_clipped', 0.0)), steps)
                 writer.add_scalar('security/eav_penalty_weighted', float(info.get('eav_penalty_weighted', 0.0)), steps)
                 writer.add_scalar('security/eav_softplus_kappa', float(info.get('eav_softplus_kappa', 0.0)), steps)
-                
+
+                # 新增：越界事件
+                writer.add_scalar('safety/is_out_of_bounds', float(info.get('is_out_of_bounds', 0.0)), steps)
+
                 # Window-based leakage rate (200 steps)
                 if window_total_users > 0:
                     window_leakage_rate = window_leakage_count / window_total_users
                     writer.add_scalar('security/train_leakage_rate_window200', window_leakage_rate, steps)
                 else:
-                    # Handle zero denominator: write 0.0 when no users in window
                     writer.add_scalar('security/train_leakage_rate_window200', 0.0, steps)
-                
+
                 # Reset window counters after logging
                 window_leakage_count = 0
                 window_total_users = 0
-                
-                # Optional: Global cumulative leakage rate (renamed to avoid confusion)
+
+                # Optional: Global cumulative leakage rate
                 if train_total_users_global > 0:
                     train_leakage_rate_global = train_leakage_count_global / train_total_users_global
                     writer.add_scalar('security/train_leakage_rate_global', train_leakage_rate_global, steps)
