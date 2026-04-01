@@ -1,9 +1,9 @@
-# 2026/3/28/18:23
-# coef 3
+# 3/30 0:22
+
 python main.py \
   --env_name Env \
   --seed 42 \
-  --num_steps 500000 \
+  --num_steps 1000000 \
   --batch_size 256 \
   --gamma 0.99 \
   --tau 0.003 \
@@ -28,13 +28,7 @@ python main.py \
   --user_move_range 20.0 \
   --reward_scale 0.1 \
   --eav_threshold 10.0 \
-  --eav_penalty_coef 3 \
-  --eav_penalty_clip_max 200.0 \
-  --comm_threshold 10.0 \
-  --comm_penalty_coef 1.5 \
-  --comm_softplus_kappa 5.0 \
-  --comm_penalty_cap_per_user 15.0 \
-  --comm_penalty_cap_total 30.0 \
+  --eav_penalty_coef 2 \
   --start_steps 10000 \
   --use_obs_normalizer False \
   --cuda cuda:2

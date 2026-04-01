@@ -40,13 +40,13 @@ class UAVISACEnvironment(gym.Env):
                  
                  # 感知与安全参数
                  eav_threshold: float = 10.0, 
-                 eav_penalty_coef: float = 2.0, 
-                 eav_penalty_clip_max: float = 1000.0,
+                 eav_penalty_coef: float = 6.0, 
+                 eav_penalty_clip_max: float = 200.0,
                  eav_softplus_kappa: float = 2.0,
                  
                  # 通信参数 (优先级较低)
                  comm_threshold=10.0,
-                 comm_penalty_coef=1.5,
+                 comm_penalty_coef=1,
                  comm_softplus_kappa: float = 5.0, # 稍微增加陡峭度
                  comm_penalty_clip_per_user=15.0,
                  comm_penalty_clip_total=30.0,
@@ -405,7 +405,8 @@ class UAVISACEnvironment(gym.Env):
         mu_los, mu_nlos = 1.44544, 199.526
         fc, c, alpha = 2.4e9, 3e8, 2.0
         K_0 = (4 * np.pi * fc) / c
-        d_3d = np.sqrt(self.H**2 + distance**2)
+        # d_3d = np.sqrt(self.H**2 + distance**2)
+        d_3d = distance
         theta = np.arcsin(self.H / d_3d) * 180 / np.pi
         p_los = 1 / (1 + c1 * np.exp(-c2 * (theta - c1)))
         p_nlos = 1 - p_los

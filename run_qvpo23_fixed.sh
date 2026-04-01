@@ -1,5 +1,8 @@
-# 2026/3/28/18:23
-# coef 3
+#!/bin/bash
+# QVPO - 修复后的配置
+# 修复内容:
+# 2. 增加探索机制（epsilon-greedy）0.0 → 0.05
+# 3/28/19:06
 python main.py \
   --env_name Env \
   --seed 42 \
@@ -11,7 +14,7 @@ python main.py \
   --critic_lr 0.0004 \
   --n_timesteps 20 \
   --beta_schedule cosine \
-  --entropy_alpha 0.05 \
+  --entropy_alpha 0.1 \
   --train_sample 32 \
   --behavior_sample 8 \
   --target_sample 2 \
@@ -28,7 +31,7 @@ python main.py \
   --user_move_range 20.0 \
   --reward_scale 0.1 \
   --eav_threshold 10.0 \
-  --eav_penalty_coef 3 \
+  --eav_penalty_coef 5.0 \
   --eav_penalty_clip_max 200.0 \
   --comm_threshold 10.0 \
   --comm_penalty_coef 1.5 \
@@ -37,4 +40,5 @@ python main.py \
   --comm_penalty_cap_total 30.0 \
   --start_steps 10000 \
   --use_obs_normalizer False \
-  --cuda cuda:2
+  --epsilon 0.05 \
+  --cuda cuda:1

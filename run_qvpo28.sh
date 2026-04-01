@@ -1,5 +1,5 @@
 # 2026/3/28/18:23
-# coef 3
+
 python main.py \
   --env_name Env \
   --seed 42 \
@@ -28,7 +28,7 @@ python main.py \
   --user_move_range 20.0 \
   --reward_scale 0.1 \
   --eav_threshold 10.0 \
-  --eav_penalty_coef 3 \
+  --eav_penalty_coef 2 \
   --eav_penalty_clip_max 200.0 \
   --comm_threshold 10.0 \
   --comm_penalty_coef 1.5 \

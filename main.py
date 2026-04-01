@@ -7,7 +7,7 @@ import numpy as np
 import torch
 
 from agent.qvpo import QVPO
-from agent.replay_memory import ReplayMemory, DiffusionMemory
+from agent.replay_memory import ReplayMemory, DiffusionMemory 
 
 from tensorboardX import SummaryWriter
 import gymnasium as gym
@@ -134,8 +134,8 @@ def readParser():
                         help="logsumexp kappa for eav_agg=logsumexp (default: 0.5)")
     parser.add_argument('--eav_threshold', type=float, default=10.0, metavar='G',
                         help="eavesdropper threshold in dB (default: 10.0)")
-    parser.add_argument('--eav_penalty_coef', type=float, default=3.0, metavar='G',
-                        help="eavesdropper penalty coefficient (default: 3.0)")
+    parser.add_argument('--eav_penalty_coef', type=float, default=6.0, metavar='G',
+                        help="eavesdropper penalty coefficient (default: 5.0)")
     parser.add_argument('--eav_penalty_cap', type=float, default=20.0, metavar='G',
                         help="eavesdropper penalty cap (default: 20.0)")
 
@@ -143,7 +143,7 @@ def readParser():
                         help="communication penalty type (default: softplus)")
     parser.add_argument('--comm_threshold', type=float, default=10.0, metavar='G',
                         help="communication threshold in dB (default: 10.0)")
-    parser.add_argument('--comm_penalty_coef', type=float, default=1.5, metavar='G',
+    parser.add_argument('--comm_penalty_coef', type=float, default=1, metavar='G',
                         help="communication penalty coefficient (default: 1.5)")
     parser.add_argument('--comm_softplus_kappa', type=float, default=5.0, metavar='G',
                         help="softplus kappa for comm_penalty=softplus (default: 5.0)")
@@ -157,8 +157,10 @@ def readParser():
                         help="average communication penalty over K users (default: True)")
     
     # 新增参数：动作平滑、用户移动范围、奖励缩放
-    parser.add_argument('--action_smooth_coef', type=float, default=0.8, metavar='G',
-                        help="action smoothness penalty coefficient (default: 0.8)")
+    parser.add_argument('--E_tot', type=int, default=25000, metavar='N',
+                        help='E_tot (default: 25000)')
+    parser.add_argument('--action_smooth_coef', type=float, default=0.1, metavar='G',
+                        help="action smoothness penalty coefficient (default: 0.1)")
     parser.add_argument('--user_move_range', type=float, default=20.0, metavar='G',
                         help="user movement range per step (default: 20.0)")
     parser.add_argument('--reward_scale', type=float, default=0.1, metavar='G',
@@ -167,8 +169,8 @@ def readParser():
     # 建议3: 分项裁剪参数
     parser.add_argument('--eta_clip_max', type=float, default=15.0, metavar='G',
                         help="max clip value for sensing SNR (default: 15.0)")
-    parser.add_argument('--eav_penalty_clip_max', type=float, default=5.0, metavar='G',
-                        help="max clip value for eav penalty (default: 5.0)")
+    parser.add_argument('--eav_penalty_clip_max', type=float, default=200.0, metavar='G',
+                        help="max clip value for eav penalty (default: 200.0)")
     parser.add_argument('--eav_softplus_kappa', type=float, default=2.0, metavar='G',
                         help="softplus kappa for eav penalty (default: 2.0)")
 
@@ -379,6 +381,7 @@ def main(args=None, logger=None, id=None):
         action_smooth_coef=args.action_smooth_coef,
         user_move_range=args.user_move_range,
         reward_scale=args.reward_scale,
+        E_tot=args.E_tot
     )
     
     eval_env = UAVISACEnvironment(
@@ -395,6 +398,7 @@ def main(args=None, logger=None, id=None):
         action_smooth_coef=args.action_smooth_coef,
         user_move_range=args.user_move_range,
         reward_scale=args.reward_scale,
+        E_tot=args.E_tot
     )
     
     # 获取状态和动作维度

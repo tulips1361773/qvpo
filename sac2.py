@@ -19,43 +19,6 @@ from myenv3 import UAVISACEnvironment
 # CSV logging utility
 from csv_logger import CSVExperimentLogger, create_scenario_name
 
-# ============================================================
-# Agent 端状态归一化 (替代环境内部的归一化)
-# ============================================================
-class RunningMeanStd:
-    def __init__(self, shape, epsilon=1e-4, clip=10.0):
-        self.mean = np.zeros(shape, 'float64')
-        self.var = np.ones(shape, 'float64')
-        self.count = epsilon
-        self.clip = clip
-
-    def update(self, x):
-        if x.ndim == 1:
-            x = x.reshape(1, -1)
-        batch_mean = np.mean(x, axis=0)
-        batch_var = np.var(x, axis=0)
-        batch_count = x.shape[0]
-        self.update_from_moments(batch_mean, batch_var, batch_count)
-
-    def update_from_moments(self, batch_mean, batch_var, batch_count):
-        delta = batch_mean - self.mean
-        tot_count = self.count + batch_count
-
-        new_mean = self.mean + delta * batch_count / tot_count
-        m_a = self.var * self.count
-        m_b = batch_var * batch_count
-        M2 = m_a + m_b + np.square(delta) * self.count * batch_count / tot_count
-        new_var = M2 / tot_count
-        new_count = tot_count
-
-        self.mean = new_mean
-        self.var = new_var
-        self.count = new_count
-
-    def normalize(self, x):
-        # (x - mean) / std
-        return np.clip((x - self.mean) / np.sqrt(self.var + 1e-8), -self.clip, self.clip).astype(np.float32)
-
 def parse_args():
     parser = argparse.ArgumentParser()
     # ==========================================
@@ -80,7 +43,8 @@ def parse_args():
     parser.add_argument("--q-lr", type=float, default=1e-3, help="q network learning rate")
     parser.add_argument("--policy-frequency", type=int, default=2, help="policy update freq")
     parser.add_argument("--target-network-frequency", type=int, default=1, help="target network update freq")
-    parser.add_argument("--alpha", type=float, default=0.2, help="Entropy coef")
+    parser.add_argument("--alpha", type=float, default=0.2, help="initial entropy coef when autotune=True, fixed entropy coef when autotune=False")
+    parser.add_argument("--alpha-lr", type=float, default=1e-4, help="temperature learning rate for entropy coefficient")
     parser.add_argument("--autotune", type=lambda x: bool(strtobool(x)), default=True, help="auto alpha")
 
     # ==========================================
@@ -98,20 +62,20 @@ def parse_args():
     
     # 奖励缩放与动作平滑
     parser.add_argument('--reward_scale', type=float, default=0.1, help="reward scaling factor")
-    parser.add_argument('--action_smooth_coef', type=float, default=0.8, help="action smoothness penalty coefficient")
+    parser.add_argument('--action_smooth_coef', type=float, default=0.1, help="action smoothness penalty coefficient")
     parser.add_argument('--user_move_range', type=float, default=20.0, help="user movement range per step")
 
     # 窃听 (Eavesdropper) 相关 (适配myenv3)
     parser.add_argument('--eav_threshold', type=float, default=10.0)
-    parser.add_argument('--eav_penalty_coef', type=float, default=2.0)
-    parser.add_argument('--eav_penalty_clip_max', type=float, default=1000.0)
+    parser.add_argument('--eav_penalty_coef', type=float, default=6.0)
+    parser.add_argument('--eav_penalty_clip_max', type=float, default=200.0)
 
     # 通信 (Communication) 相关 (适配myenv3)
     parser.add_argument('--comm_threshold', type=float, default=10.0)
-    parser.add_argument('--comm_penalty_coef', type=float, default=0.5)
-    parser.add_argument('--comm_softplus_kappa', type=float, default=2.0)
-    parser.add_argument('--comm_penalty_clip_per_user', type=float, default=20.0)
-    parser.add_argument('--comm_penalty_clip_total', type=float, default=50.0)
+    parser.add_argument('--comm_penalty_coef', type=float, default=1)
+    parser.add_argument('--comm_softplus_kappa', type=float, default=5.0)
+    parser.add_argument('--comm_penalty_clip_per_user', type=float, default=15.0)
+    parser.add_argument('--comm_penalty_clip_total', type=float, default=30.0)
 
     args = parser.parse_args()
     return args
@@ -119,10 +83,10 @@ def parse_args():
 def make_uav_env(args):
     """
     初始化环境，传入所有物理参数 (适配myenv3)
-    注意：SAC不启用StateNormalizer，由Agent端进行归一化
+    注意：为了与QVPO baseline保持一致，使用环境侧的固定归一化
     """
     env = UAVISACEnvironment(
-        use_state_scaling=False,
+        use_state_scaling=True,
         
         # 窃听相关
         eav_threshold=args.eav_threshold,
@@ -194,7 +158,7 @@ class Actor(nn.Module):
         mean = torch.tanh(mean)
         return action, log_prob, mean
 
-def evaluate_sac(env, actor, obs_rms, device, episodes=10):
+def evaluate_sac(env, actor, device, episodes=10):
     """
     SAC evaluation function - returns unified evaluation results dict.
     Matches the structure of QVPO's evaluate() function.
@@ -222,13 +186,10 @@ def evaluate_sac(env, actor, obs_rms, device, episodes=10):
         ep_eav_snr_avg_list = []
         
         while not eval_done:
-            # Normalize observation using training statistics
-            norm_eval_obs = obs_rms.normalize(eval_obs)
-            
             with torch.no_grad():
                 # Get deterministic action (mean)
                 _, _, eval_action_mean = actor.get_action(
-                    torch.Tensor(norm_eval_obs).to(device).unsqueeze(0)
+                    torch.Tensor(eval_obs).to(device).unsqueeze(0)
                 )
                 eval_action = eval_action_mean.cpu().numpy().flatten()
             
@@ -365,13 +326,9 @@ if __name__ == "__main__":
     print(f"Using device: {device}")
 
     # 环境初始化
-    print("Initializing Environments (Using myenv3 without internal normalization)...")
+    print("Initializing Environments (Using myenv3 with fixed state scaling, matching QVPO)...")
     env = make_uav_env(args)
     eval_env = make_uav_env(args)
-
-    # 🔥 Agent 端状态归一化初始化
-    # 因为环境是Raw的，所以Agent必须维护一个归一化器
-    obs_rms = RunningMeanStd(shape=env.observation_space.shape)
 
     actor = Actor(env).to(device)
     qf1 = SoftQNetwork(env).to(device)
@@ -384,11 +341,15 @@ if __name__ == "__main__":
     q_optimizer = optim.Adam(list(qf1.parameters()) + list(qf2.parameters()), lr=args.q_lr)
     actor_optimizer = optim.Adam(actor.parameters(), lr=args.policy_lr)
 
+    actor_loss = torch.tensor(0.0, device=device)
+    alpha_loss = torch.tensor(0.0, device=device)
+
     if args.autotune:
-        target_entropy = -torch.prod(torch.Tensor(env.action_space.shape).to(device)).item()
-        log_alpha = torch.zeros(1, requires_grad=True, device=device)
+        target_entropy = -float(np.prod(env.action_space.shape))
+        init_log_alpha = np.log(max(args.alpha, 1e-8))
+        log_alpha = torch.tensor(init_log_alpha, dtype=torch.float32, device=device, requires_grad=True)
         alpha = log_alpha.exp().item()
-        a_optimizer = optim.Adam([log_alpha], lr=args.q_lr)
+        a_optimizer = optim.Adam([log_alpha], lr=args.alpha_lr)
     else:
         alpha = args.alpha
 
@@ -432,8 +393,6 @@ if __name__ == "__main__":
     last_completed_episode_reward = np.nan
     
     obs, _ = env.reset(seed=args.seed)
-    # 初始状态更新到归一化器
-    obs_rms.update(obs)
 
     episode_reward = 0
     episode_steps = 0
@@ -451,10 +410,8 @@ if __name__ == "__main__":
         if global_step < args.learning_starts:
             action = env.action_space.sample()
         else:
-            # 🔥 归一化后输入网络
-            norm_obs = obs_rms.normalize(obs)
             with torch.no_grad():
-                action, _, _ = actor.get_action(torch.Tensor(norm_obs).to(device).unsqueeze(0))
+                action, _, _ = actor.get_action(torch.Tensor(obs).to(device).unsqueeze(0))
                 action = action.cpu().numpy().flatten()
 
         # 2. 环境步进 (获取 Raw State)
@@ -534,9 +491,6 @@ if __name__ == "__main__":
 
         episode_reward += reward
         obs = next_obs
-        
-        # 更新归一化统计量 (用新遇到的 Raw State)
-        obs_rms.update(obs)
 
         # Episode 结束
         done = terminated or truncated
@@ -572,7 +526,6 @@ if __name__ == "__main__":
             
             # Reset episode
             obs, _ = env.reset()
-            obs_rms.update(obs)
             episode_reward = 0
             episode_steps = 0
             
@@ -584,15 +537,8 @@ if __name__ == "__main__":
         if global_step > args.learning_starts:
             idxs = np.random.randint(0, rb_size, size=args.batch_size)
             
-            # 从 Buffer 取出 Raw Data
-            b_obs_raw = rb_obs[idxs]
-            b_next_obs_raw = rb_next_obs[idxs]
-            
-            # 🔥 关键：在训练前实时归一化 batch
-            # 这解决了异策略 Buffer 数据分布漂移的问题
-            b_obs = torch.tensor(obs_rms.normalize(b_obs_raw), device=device)
-            b_next_obs = torch.tensor(obs_rms.normalize(b_next_obs_raw), device=device)
-            
+            b_obs = torch.tensor(rb_obs[idxs], device=device)
+            b_next_obs = torch.tensor(rb_next_obs[idxs], device=device)
             b_actions = torch.tensor(rb_actions[idxs], device=device)
             b_rewards = torch.tensor(rb_rewards[idxs], device=device)
             b_dones = torch.tensor(rb_dones[idxs], device=device)
@@ -630,7 +576,7 @@ if __name__ == "__main__":
                 if args.autotune:
                     with torch.no_grad():
                         _, log_pi, _ = actor.get_action(b_obs)
-                    alpha_loss = (-log_alpha.exp() * (log_pi + target_entropy)).mean()
+                    alpha_loss = -(log_alpha * (log_pi + target_entropy)).mean()
                     a_optimizer.zero_grad()
                     alpha_loss.backward()
                     a_optimizer.step()
@@ -646,8 +592,8 @@ if __name__ == "__main__":
             if global_step % 1000 == 0:
                 writer.add_scalar('losses/qf_loss', qf_loss.item(), global_step)
                 writer.add_scalar('losses/actor_loss', actor_loss.item(), global_step)
+                writer.add_scalar('alpha/value', alpha, global_step)
                 if args.autotune:
-                    writer.add_scalar('alpha/value', alpha, global_step)
                     writer.add_scalar('losses/alpha_loss', alpha_loss.item(), global_step)
 
         # ============================================================
@@ -659,7 +605,7 @@ if __name__ == "__main__":
             print(f"{'='*60}")
             
             # Use unified evaluate function
-            eval_results = evaluate_sac(eval_env, actor, obs_rms, device, episodes=args.eval_episodes)
+            eval_results = evaluate_sac(eval_env, actor, device, episodes=args.eval_episodes)
             
             # TensorBoard logging (保持原有逻辑)
             writer.add_scalar('reward/eval_mean', eval_results['mean_return'], global_step)
@@ -697,7 +643,7 @@ if __name__ == "__main__":
     print(f"Training completed! Performing final evaluation...")
     print(f"{'='*60}")
     
-    final_eval_results = evaluate_sac(eval_env, actor, obs_rms, device, episodes=args.eval_episodes)
+    final_eval_results = evaluate_sac(eval_env, actor, device, episodes=args.eval_episodes)
     training_total_time = time.time() - training_start_time
     
     # CSV logging for final comparison
