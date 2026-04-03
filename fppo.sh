@@ -1,0 +1,31 @@
+# 4/1 21:18  42
+#22:38  101
+python ppo.py \
+  --env_name Env \
+  --seed 101 \
+  --num_steps 1000000 \
+  --rollout_steps 2048 \
+  --learning_rate 3e-4 \
+  --num_minibatches 32 \
+  --update_epochs 10 \
+  --gamma 0.99 \
+  --gae_lambda 0.95 \
+  --clip_coef 0.2 \
+  --ent_coef 0.0 \
+  --vf_coef 0.5 \
+  --max_grad_norm 0.5 \
+  --use_state_scaling \
+  --eav_threshold 10.0 \
+  --eav_penalty_coef 5.0 \
+  --eav_penalty_clip_max 200.0 \
+  --eav_softplus_kappa 2.0 \
+  --comm_threshold 10.0 \
+  --comm_penalty_coef 1 \
+  --comm_softplus_kappa 5.0 \
+  --comm_penalty_cap_per_user 15.0 \
+  --comm_penalty_cap_total 30.0 \
+  --action_smooth_coef 0.1 \
+  --user_move_range 20.0 \
+  --cuda cuda:2 \
+  --use_state_scaling True \
+  --reward_scale 0.1

@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # 4/1  0；36
-# 512-->256有效果 不那么震荡
-python td3.py \
+# 4/2 0：08  101
+# (Tau) 从 0.005 降低到 0.003：让目标网络更新更缓慢，提供更稳定的学习目标。
+# Policy Noise 降低至 0.1：与你现有的探索噪声水平对齐，避免在评估目标动作时引入过大的随机扰动。
+
+python td3_2.py \
   --env_name Env \
   --seed 42 \
   --num_steps 1000000 \
@@ -10,7 +13,7 @@ python td3.py \
   --tau 0.005 \
   --actor_lr 0.0003 \
   --critic_lr 0.0003 \
-  --policy_noise 0.2 \
+  --policy_noise 0.1 \
   --noise_clip 0.5 \
   --exploration_noise 0.1 \
   --exploration_noise_min 0.03 \

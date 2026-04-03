@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# 4/1  0；36
-# 512-->256有效果 不那么震荡
-python td3.py \
+# 4/2 23:00
+python td3_3.py \
   --env_name Env \
   --seed 42 \
   --num_steps 1000000 \
@@ -10,7 +9,7 @@ python td3.py \
   --tau 0.005 \
   --actor_lr 0.0003 \
   --critic_lr 0.0003 \
-  --policy_noise 0.2 \
+  --policy_noise 0.1 \
   --noise_clip 0.5 \
   --exploration_noise 0.1 \
   --exploration_noise_min 0.03 \
@@ -30,4 +29,4 @@ python td3.py \
   --comm_penalty_cap_total 30.0 \
   --start_steps 10000 \
   --use_obs_normalizer False \
-  --cuda cuda:2
+  --cuda cuda:1

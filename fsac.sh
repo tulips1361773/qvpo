@@ -2,7 +2,7 @@
 # 3/29 19:43
 python sac2.py \
     --exp-name "fsac" \
-    --seed 42 \
+    --seed 101 \
     --total-timesteps 1000000 \
     --learning-starts 10000 \
     --buffer-size 1000000 \
