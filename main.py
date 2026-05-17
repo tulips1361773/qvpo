@@ -15,7 +15,7 @@ import os
 from logger import Logger
 import datetime
 
-# 修改1: 导入自定义环境
+# 导入自定义环境
 from myenv3 import UAVISACEnvironment
 # CSV logging utility
 from csv_logger import CSVExperimentLogger, create_scenario_name
@@ -358,7 +358,7 @@ def main(args=None, logger=None, id=None):
     # Training start time for CSV logging
     training_start_time = time.time()
 
-    # 🔥🔥🔥 关键修改：直接实例化环境，传入归一化参数
+    # 实例化环境，传入归一化参数
     print("Initializing UAV-ISAC Environment...")
     print(f"  - State scaling (fixed): {args.use_state_scaling}")
     print(f"  - Agent-side obs normalizer: {args.use_obs_normalizer}")
