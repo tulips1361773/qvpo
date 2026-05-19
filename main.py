@@ -360,12 +360,6 @@ def main(args=None, logger=None, id=None):
 
     # 实例化环境，传入归一化参数
     print("Initializing UAV-ISAC Environment...")
-    print(f"  - State scaling (fixed): {args.use_state_scaling}")
-    print(f"  - Agent-side obs normalizer: {args.use_obs_normalizer}")
-    if args.use_obs_normalizer:
-        print(f"    * Freeze after: {args.obs_norm_freeze_after} steps")
-        print(f"    * Clip range: {args.obs_norm_clip}")
-        print(f"    * Epsilon: {args.obs_norm_eps}")
     
     env = UAVISACEnvironment(
         use_state_scaling=args.use_state_scaling,
@@ -420,19 +414,16 @@ def main(args=None, logger=None, id=None):
     updates_per_step = 1
     batch_size = args.batch_size
     log_interval = 10
-
     recent_rewards = deque(maxlen=100)
     ema_reward = None
-    
-    # Episode-level leakage rate tracking (MA100)
     recent_leakage_rates = deque(maxlen=100)
 
     # 创建经验池
     memory = ReplayMemory(state_size, action_size, memory_size, device)
     diffusion_memory = DiffusionMemory(state_size, action_size, memory_size, device)
 
-    # 创建QVPO智能体
-    print("Creating QVPO agent...")
+    # 创建智能体
+    print("Creating agent...")
     agent = QVPO(args, state_size, env.action_space, memory, diffusion_memory, device)
 
     if args.load_id is not None:
@@ -447,18 +438,16 @@ def main(args=None, logger=None, id=None):
     print(f"Random exploration for first {start_steps} steps")
 
     # 泄露率统计变量
-    # Global cumulative (renamed to avoid confusion)
     train_leakage_count_global = 0
     train_total_users_global = 0
-    
-    # Window-based (200 steps)
     window_leakage_count = 0
     window_total_users = 0
     
     # 训练奖励跟踪：记录最近一个已完成episode的总reward
-    # 用于CSV日志的train_reward字段，语义明确为"最近完成的训练episode总reward"
+    # 用于CSV日志的train_reward字段，表示"最近完成的训练episode总reward"
     last_completed_episode_reward = np.nan
 
+    # 外层循环：eposide，完成一段完整的轨迹训练。初始化环境，计算累计奖励，泄露率
     while steps < num_steps:
         episode_reward = 0.
         episode_steps = 0
@@ -472,6 +461,7 @@ def main(args=None, logger=None, id=None):
         state, _ = env.reset(seed=args.seed + episodes)
         episodes += 1
         
+        # 内层循环，step
         while not (done or truncated):
             # 动作选择
             if start_steps > steps:
@@ -546,8 +536,6 @@ def main(args=None, logger=None, id=None):
                 writer.add_scalar('reward_terms/action_smooth_penalty', float(info.get('action_smooth_penalty', 0.0)), steps)
                 writer.add_scalar('reward_terms/reward_raw', float(info.get('reward_raw', 0.0)), steps)
 
-                # 旧的 reward_clip_1 是假指标，这里删除，不再记录
-                # writer.add_scalar('reward_terms/reward_clip_1', ...)
 
                 # -----------------------------
                 # 自检图：应接近 0
@@ -620,7 +608,7 @@ def main(args=None, logger=None, id=None):
                 print(f"{'='*60}")
                 eval_results = evaluate(eval_env, agent, steps, episodes=30)
                 
-                # TensorBoard logging (保持原有逻辑)
+                # TensorBoard logging 
                 writer.add_scalar('reward/eval_mean', eval_results['mean_return'], steps)
                 writer.add_scalar('security/eval_leakage_rate', eval_results['eval_leakage_rate'], steps)
                 

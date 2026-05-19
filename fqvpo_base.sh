@@ -2,7 +2,7 @@
 
 python main.py \
   --env_name Env \
-  --seed 101 \
+  --seed 42 \
   --num_steps 1000000 \
   --batch_size 256 \
   --gamma 0.99 \
